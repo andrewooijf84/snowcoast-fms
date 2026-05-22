@@ -5,15 +5,16 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine,
 } from 'recharts'
-import { Plus, Calculator, Trash2, Pencil } from 'lucide-react'
+import { Plus, Calculator, CalendarDays, Trash2, Pencil } from 'lucide-react'
 import { useAppStore } from '@/store/useStore'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { PageSpinner, InlineError } from '@/components/ui/spinner'
 import { FormModal, TextField, SelectField, TextareaField } from '@/components/ui/form-modal'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { LINES } from '@/data/mockData'
-import { countWorkingDays } from '@/lib/workingDays'
+import { countWorkingDays, addWorkingDays } from '@/lib/workingDays'
 
 const OPERATORS = 25
 const HOURS = 8
@@ -90,54 +91,118 @@ function AllocationForm({ open, onClose, orders, onSave, initial }) {
   )
 }
 
-// ── SMV Calculator ────────────────────────────────────────────────────────────
-function SMVCalculator() {
-  const [inp, setInp] = useState({ operators: 25, workingDays: 5, hoursPerDay: 8, efficiency: 85 })
-  const [smv, setSmv] = useState(35.5)
-  const [qty, setQty] = useState(5000)
-  const set = (k, v) => setInp(p => ({ ...p, [k]: Number(v) }))
-
-  const res = useMemo(() => {
-    const avail = inp.operators * inp.workingDays * inp.hoursPerDay * 60 * (inp.efficiency / 100)
-    const req   = smv * qty
-    const days  = Math.ceil(req / (inp.operators * inp.hoursPerDay * 60 * (inp.efficiency / 100)))
-    return { avail: Math.round(avail), req: Math.round(req), days, pct: Math.round((req / avail) * 100) }
-  }, [inp, smv, qty])
-
+// ── Planning Tools ─────────────────────────────────────────────────────────────
+function PlanningTools() {
   const ic = 'flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
+  const today = new Date().toISOString().split('T')[0]
+
+  // SMV Calculator
+  const [smvInp, setSmvInp] = useState({ headcount: 25, hours: 8, smv: 35.5, targetPcs: 5000 })
+  const smvRes = useMemo(() => {
+    const capMin  = smvInp.headcount * smvInp.hours * 60
+    const loadMin = smvInp.targetPcs * smvInp.smv
+    const pct     = capMin > 0 ? Math.round((loadMin / capMin) * 100) : 0
+    return { capMin: Math.round(capMin), loadMin: Math.round(loadMin), pct }
+  }, [smvInp])
+
+  // Output & Finish Date Calculator
+  const [outInp, setOutInp] = useState({ targetDailyPcs: 500, orderQty: 5000, startDate: today })
+  const outRes = useMemo(() => {
+    const pcs = Number(outInp.targetDailyPcs)
+    const qty = Number(outInp.orderQty)
+    if (!pcs || !qty || !outInp.startDate) return null
+    const daysNeeded  = Math.ceil(qty / pcs)
+    const finishDate  = addWorkingDays(new Date(outInp.startDate), daysNeeded)
+    return { daysNeeded, finishDate }
+  }, [outInp])
+
   return (
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="text-base flex items-center gap-2">
-          <Calculator className="w-5 h-5 text-blue-600" />SMV Calculator
+          <Calculator className="w-5 h-5 text-blue-600" />Planning Tools
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="grid grid-cols-2 gap-3">
-          {[['operators','Operators'],['workingDays','Working Days'],['hoursPerDay','Hours/Day'],['efficiency','Efficiency %']].map(([k,l]) => (
-            <div key={k}>
-              <p className="text-xs font-medium text-slate-600 mb-1">{l}</p>
-              <input type="number" value={inp[k]} onChange={e => set(k, e.target.value)} className={ic} />
+      <CardContent>
+        <Tabs defaultValue="smv">
+          <TabsList className="w-full mb-4">
+            <TabsTrigger value="smv" className="flex-1 text-xs">SMV Calculator</TabsTrigger>
+            <TabsTrigger value="output" className="flex-1 text-xs">Output & Finish Date</TabsTrigger>
+          </TabsList>
+
+          {/* ── Tab 1: SMV Calculator ── */}
+          <TabsContent value="smv" className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              {[
+                ['headcount', 'Headcount',   '1'],
+                ['hours',     'Hours/Day',   '0.5'],
+                ['smv',       'SMV',         '0.1'],
+                ['targetPcs', 'Target Pcs',  '1'],
+              ].map(([k, label, step]) => (
+                <div key={k}>
+                  <p className="text-xs font-medium text-slate-600 mb-1">{label}</p>
+                  <input type="number" step={step} value={smvInp[k]}
+                    onChange={e => setSmvInp(p => ({ ...p, [k]: Number(e.target.value) }))}
+                    className={ic} />
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-        <div className="grid grid-cols-2 gap-3 border-t pt-3">
-          <div><p className="text-xs font-medium text-slate-600 mb-1">Order SMV</p>
-            <input type="number" step="0.1" value={smv} onChange={e => setSmv(+e.target.value)} className={ic} /></div>
-          <div><p className="text-xs font-medium text-slate-600 mb-1">Order Qty</p>
-            <input type="number" value={qty} onChange={e => setQty(+e.target.value)} className={ic} /></div>
-        </div>
-        <div className="bg-slate-50 rounded-xl p-4 space-y-2 border border-slate-200">
-          {[['Available Minutes', res.avail.toLocaleString()],['Required Minutes', res.req.toLocaleString()],['Days Required', res.days]].map(([l,v]) => (
-            <div key={l} className="flex justify-between text-xs">
-              <span className="text-slate-600">{l}</span><span className="font-bold">{v}</span>
+            <div className="bg-slate-50 rounded-xl p-4 space-y-2 border border-slate-200">
+              {[
+                ['Capacity Minutes', smvRes.capMin.toLocaleString()],
+                ['Loading Minutes',  smvRes.loadMin.toLocaleString()],
+              ].map(([l, v]) => (
+                <div key={l} className="flex justify-between text-xs">
+                  <span className="text-slate-600">{l}</span>
+                  <span className="font-bold">{v}</span>
+                </div>
+              ))}
+              <div className="flex justify-between items-center border-t pt-2">
+                <span className="text-xs font-semibold">Loading %</span>
+                <LoadBadge pct={smvRes.pct} />
+              </div>
             </div>
-          ))}
-          <div className="flex justify-between items-center border-t pt-2">
-            <span className="text-xs font-semibold">Loading %</span>
-            <LoadBadge pct={res.pct} />
-          </div>
-        </div>
+          </TabsContent>
+
+          {/* ── Tab 2: Output & Finish Date ── */}
+          <TabsContent value="output" className="space-y-3">
+            <div className="space-y-3">
+              {[
+                ['targetDailyPcs', 'Target Daily Pcs', 'number', '1'],
+                ['orderQty',       'Order Qty',        'number', '1'],
+              ].map(([k, label, type, step]) => (
+                <div key={k}>
+                  <p className="text-xs font-medium text-slate-600 mb-1">{label}</p>
+                  <input type={type} step={step} value={outInp[k]}
+                    onChange={e => setOutInp(p => ({ ...p, [k]: e.target.value }))}
+                    className={ic} />
+                </div>
+              ))}
+              <div>
+                <p className="text-xs font-medium text-slate-600 mb-1">Sewing Start Date</p>
+                <input type="date" value={outInp.startDate}
+                  onChange={e => setOutInp(p => ({ ...p, startDate: e.target.value }))}
+                  className={ic} />
+              </div>
+            </div>
+            {outRes && (
+              <div className="bg-slate-50 rounded-xl p-4 space-y-2 border border-slate-200">
+                <div className="flex justify-between text-xs">
+                  <span className="text-slate-600">Working Days Needed</span>
+                  <span className="font-bold">{outRes.daysNeeded} days</span>
+                </div>
+                <div className="flex justify-between items-center border-t pt-2">
+                  <span className="flex items-center gap-1 text-xs font-semibold">
+                    <CalendarDays className="w-3.5 h-3.5" />Finish Date
+                  </span>
+                  <span className="font-bold text-blue-700">
+                    {format(outRes.finishDate, 'MMM dd, yyyy (EEE)')}
+                  </span>
+                </div>
+              </div>
+            )}
+          </TabsContent>
+        </Tabs>
       </CardContent>
     </Card>
   )
@@ -204,7 +269,7 @@ export default function CapacityLoading() {
     <div className="space-y-6">
       <InlineError message={errors.allocations} />
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <SMVCalculator />
+        <PlanningTools />
 
         <div className="lg:col-span-2 space-y-4">
           <Card>

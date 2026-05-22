@@ -45,6 +45,19 @@ export function countWorkingDays(start, end) {
   return n
 }
 
+// Returns the date that is exactly numDays working days from startDate (startDate = day 1 if it is a working day).
+export function addWorkingDays(startDate, numDays) {
+  const d = new Date(startDate)
+  d.setHours(0, 0, 0, 0)
+  if (isNaN(d.getTime()) || numDays <= 0) return d
+  let counted = 0
+  while (counted < numDays) {
+    if (isWorkingDay(d)) counted++
+    if (counted < numDays) d.setDate(d.getDate() + 1)
+  }
+  return d
+}
+
 // Working days strictly between completion and ship (excludes completion day, includes ship day).
 // Returns positive if ship > completion, 0 if same day, negative if ship < completion (critical).
 export function shipmentGapWorkingDays(completionDate, shipDate) {
