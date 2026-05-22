@@ -1,7 +1,9 @@
 import { supabase } from './supabase'
 
-// ── Transformers (DB snake_case → app camelCase) ──────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const d = (v) => (v instanceof Date ? v.toISOString().split('T')[0] : v || null)
 
+// ── Order transformers ────────────────────────────────────────────────────────
 function toOrder(row) {
   return {
     id: row.id,
@@ -10,9 +12,9 @@ function toOrder(row) {
     buyer: row.buyer,
     qty: row.qty,
     smv: parseFloat(row.smv),
-    startDate: new Date(row.start_date),
-    endDate: new Date(row.end_date),
-    shipDate: new Date(row.ship_date),
+    startDate: row.start_date ? new Date(row.start_date) : null,
+    endDate: row.end_date ? new Date(row.end_date) : null,
+    shipDate: row.ship_date ? new Date(row.ship_date) : null,
     status: row.status,
     progress: row.progress,
     componentLine: row.component_line,
@@ -20,70 +22,60 @@ function toOrder(row) {
     requiresEmbroidery: row.requires_embroidery,
     color: row.color || '#3b82f6',
     notes: row.notes || '',
+    season: row.season || '',
+    materialArrivalDate: row.material_arrival_date ? new Date(row.material_arrival_date) : null,
+    cutStartDate: row.cut_start_date ? new Date(row.cut_start_date) : null,
+    embStartDate: row.emb_start_date ? new Date(row.emb_start_date) : null,
+    sewStartDate: row.sew_start_date ? new Date(row.sew_start_date) : null,
+    completionDate: row.completion_date ? new Date(row.completion_date) : null,
   }
 }
 
-function fromOrder(order) {
+function fromOrder(o) {
   return {
-    order_no: order.orderNo,
-    style: order.style,
-    buyer: order.buyer,
-    qty: order.qty,
-    smv: order.smv,
-    start_date: order.startDate instanceof Date ? order.startDate.toISOString().split('T')[0] : order.startDate,
-    end_date: order.endDate instanceof Date ? order.endDate.toISOString().split('T')[0] : order.endDate,
-    ship_date: order.shipDate instanceof Date ? order.shipDate.toISOString().split('T')[0] : order.shipDate,
-    status: order.status,
-    progress: order.progress,
-    component_line: order.componentLine,
-    assembly_line: order.assemblyLine,
-    requires_embroidery: order.requiresEmbroidery || false,
-    color: order.color || '#3b82f6',
-    notes: order.notes || '',
+    order_no: o.orderNo,
+    style: o.style,
+    buyer: o.buyer,
+    qty: Number(o.qty),
+    smv: Number(o.smv),
+    start_date: d(o.startDate || o.cutStartDate),
+    end_date: d(o.endDate || o.completionDate),
+    ship_date: d(o.shipDate),
+    status: o.status || 'pending',
+    progress: Number(o.progress) || 0,
+    component_line: o.componentLine,
+    assembly_line: o.assemblyLine,
+    requires_embroidery: !!o.requiresEmbroidery,
+    color: o.color || '#3b82f6',
+    notes: o.notes || '',
+    season: o.season || '',
+    material_arrival_date: d(o.materialArrivalDate),
+    cut_start_date: d(o.cutStartDate),
+    emb_start_date: o.requiresEmbroidery ? d(o.embStartDate) : null,
+    sew_start_date: d(o.sewStartDate),
+    completion_date: d(o.completionDate),
   }
 }
 
 // ── Orders ────────────────────────────────────────────────────────────────────
-
 export async function fetchOrders() {
-  const { data, error } = await supabase
-    .from('orders')
-    .select('*')
-    .order('ship_date', { ascending: true })
+  const { data, error } = await supabase.from('orders').select('*').order('ship_date')
   if (error) throw error
   return data.map(toOrder)
 }
 
 export async function createOrder(order) {
-  const { data, error } = await supabase
-    .from('orders')
-    .insert(fromOrder(order))
-    .select()
-    .single()
+  const { data, error } = await supabase.from('orders').insert(fromOrder(order)).select().single()
   if (error) throw error
-  return toOrder(data)
+  const saved = toOrder(data)
+  await createMilestonesForOrder(saved.id, order)
+  return saved
 }
 
 export async function updateOrder(id, updates) {
-  const dbUpdates = {}
-  const map = {
-    orderNo: 'order_no', style: 'style', buyer: 'buyer', qty: 'qty', smv: 'smv',
-    startDate: 'start_date', endDate: 'end_date', shipDate: 'ship_date',
-    status: 'status', progress: 'progress', componentLine: 'component_line',
-    assemblyLine: 'assembly_line', requiresEmbroidery: 'requires_embroidery',
-    color: 'color', notes: 'notes',
-  }
-  for (const [key, dbKey] of Object.entries(map)) {
-    if (updates[key] !== undefined) {
-      let val = updates[key]
-      if ((key === 'startDate' || key === 'endDate' || key === 'shipDate') && val instanceof Date) {
-        val = val.toISOString().split('T')[0]
-      }
-      dbUpdates[dbKey] = val
-    }
-  }
-  const { data, error } = await supabase
-    .from('orders').update(dbUpdates).eq('id', id).select().single()
+  const current = { ...updates }
+  const dbRow = fromOrder(current)
+  const { data, error } = await supabase.from('orders').update(dbRow).eq('id', id).select().single()
   if (error) throw error
   return toOrder(data)
 }
@@ -93,147 +85,234 @@ export async function deleteOrder(id) {
   if (error) throw error
 }
 
-// ── Capacity Data ─────────────────────────────────────────────────────────────
+// Auto-create milestones when order is saved
+async function createMilestonesForOrder(orderId, order) {
+  const milestones = [
+    { name: 'Material Arrival', date: order.materialArrivalDate, sort_order: 0 },
+    { name: 'Cut Start', date: order.cutStartDate, sort_order: 1 },
+    order.requiresEmbroidery ? { name: 'Embroidery Start', date: order.embStartDate, sort_order: 2 } : null,
+    { name: 'Sew Start', date: order.sewStartDate, sort_order: 3 },
+    { name: 'Completion', date: order.completionDate, sort_order: 4 },
+    { name: 'Ex-Factory', date: order.shipDate, sort_order: 5 },
+  ].filter(Boolean)
 
-export async function fetchCapacityData() {
+  const rows = milestones
+    .filter(m => m.date)
+    .map(m => ({
+      order_id: orderId,
+      name: m.name,
+      milestone_date: d(m.date),
+      done: false,
+      status: 'pending',
+      sort_order: m.sort_order,
+    }))
+
+  if (rows.length) {
+    const { error } = await supabase.from('shipment_milestones').insert(rows)
+    if (error) console.warn('milestone insert:', error.message)
+  }
+}
+
+// ── Line Allocations ──────────────────────────────────────────────────────────
+export async function fetchLineAllocations() {
   const { data, error } = await supabase
-    .from('capacity_data')
-    .select('*')
-    .order('week_start', { ascending: true })
+    .from('line_allocations')
+    .select(`*, orders(id, order_no, buyer, style, smv, color, requires_embroidery, qty)`)
+    .order('start_date')
   if (error) throw error
   return data.map(row => ({
     id: row.id,
-    week: row.week_label,
-    weekLabel: row.week_label,
-    weekStart: new Date(row.week_start),
-    capacityPcs: row.capacity_pcs,
-    loadedPcs: row.loaded_pcs,
-    capacityMins: row.capacity_mins,
-    loadedMins: row.loaded_mins,
-    loadingPct: row.loading_pct,
+    orderId: row.order_id,
+    linePairNo: row.line_pair_no,
+    startDate: new Date(row.start_date),
+    endDate: new Date(row.end_date),
+    allocatedQty: row.allocated_qty,
+    targetDailyPcs: row.target_daily_pcs,
+    notes: row.notes || '',
+    order: row.orders ? toOrder(row.orders) : null,
+    // convenience
+    orderNo: row.orders?.order_no || '',
+    color: row.orders?.color || '#3b82f6',
+    smv: row.orders?.smv || 0,
   }))
 }
 
-// ── Section Output ────────────────────────────────────────────────────────────
-
-export async function fetchSectionOutput() {
-  const { data, error } = await supabase
-    .from('section_output')
-    .select('*')
-    .order('period_date', { ascending: true })
+export async function createLineAllocation(alloc) {
+  const { data, error } = await supabase.from('line_allocations').insert({
+    order_id: alloc.orderId,
+    line_pair_no: Number(alloc.linePairNo),
+    start_date: d(alloc.startDate),
+    end_date: d(alloc.endDate),
+    allocated_qty: Number(alloc.allocatedQty),
+    target_daily_pcs: Number(alloc.targetDailyPcs),
+    notes: alloc.notes || '',
+  }).select(`*, orders(id, order_no, buyer, style, smv, color, qty)`).single()
   if (error) throw error
-
-  const sections = ['cutting', 'embroidery', 'downFilling', 'template', 'component', 'assembly', 'packing']
-  return sections.map(section => {
-    const rows = data.filter(r => r.section === section)
-    return {
-      section,
-      daily: rows.filter(r => r.period_type === 'daily').map(r => ({
-        date: new Date(r.period_date),
-        target: r.target, actual: r.actual, efficiency: r.efficiency,
-      })),
-      weekly: rows.filter(r => r.period_type === 'weekly').map(r => ({
-        week: r.period_label, target: r.target, actual: r.actual, efficiency: r.efficiency,
-      })),
-      monthly: rows.filter(r => r.period_type === 'monthly').map(r => ({
-        month: r.period_label, target: r.target, actual: r.actual, efficiency: r.efficiency,
-      })),
-    }
-  })
+  return {
+    id: data.id, orderId: data.order_id, linePairNo: data.line_pair_no,
+    startDate: new Date(data.start_date), endDate: new Date(data.end_date),
+    allocatedQty: data.allocated_qty, targetDailyPcs: data.target_daily_pcs,
+    notes: data.notes, order: data.orders ? toOrder(data.orders) : null,
+    orderNo: data.orders?.order_no || '', color: data.orders?.color || '#3b82f6',
+  }
 }
 
-// ── Shipments (orders + milestones) ──────────────────────────────────────────
+export async function deleteLineAllocation(id) {
+  const { error } = await supabase.from('line_allocations').delete().eq('id', id)
+  if (error) throw error
+}
 
+export async function updateLineAllocation(id, updates) {
+  const payload = {}
+  if (updates.startDate    !== undefined) payload.start_date       = d(updates.startDate)
+  if (updates.endDate      !== undefined) payload.end_date         = d(updates.endDate)
+  if (updates.allocatedQty !== undefined) payload.allocated_qty    = Number(updates.allocatedQty)
+  if (updates.targetDailyPcs !== undefined) payload.target_daily_pcs = Number(updates.targetDailyPcs)
+  if (updates.notes        !== undefined) payload.notes            = updates.notes
+  const { data, error } = await supabase
+    .from('line_allocations')
+    .update(payload)
+    .eq('id', id)
+    .select(`*, orders(id, order_no, buyer, style, smv, color, qty)`)
+    .single()
+  if (error) throw error
+  return {
+    id: data.id, orderId: data.order_id, linePairNo: data.line_pair_no,
+    startDate: new Date(data.start_date), endDate: new Date(data.end_date),
+    allocatedQty: data.allocated_qty, targetDailyPcs: data.target_daily_pcs,
+    notes: data.notes || '', order: data.orders ? toOrder(data.orders) : null,
+    orderNo: data.orders?.order_no || '', color: data.orders?.color || '#3b82f6',
+  }
+}
+
+// ── Section Output ────────────────────────────────────────────────────────────
+export async function fetchSectionOutputRows() {
+  const { data, error } = await supabase
+    .from('section_output')
+    .select(`*, orders(id, order_no, buyer, requires_embroidery)`)
+    .order('period_date', { ascending: false })
+  if (error) throw error
+  return data.map(row => ({
+    id: row.id,
+    section: row.section,
+    periodType: row.period_type,
+    periodDate: row.period_date ? new Date(row.period_date) : null,
+    periodLabel: row.period_label,
+    orderId: row.order_id,
+    orderNo: row.orders?.order_no || '',
+    target: row.target,
+    actual: row.actual,
+    efficiency: row.efficiency,
+    wipReceived: row.wip_received || 0,
+    wipPassedOut: row.wip_passed_out || 0,
+    remarks: row.remarks || '',
+  }))
+}
+
+export async function createSectionOutputEntry(entry) {
+  const efficiency = entry.target > 0 ? Math.round((entry.actual / entry.target) * 100) : 0
+  const { data, error } = await supabase.from('section_output').insert({
+    section: entry.section,
+    period_type: 'daily',
+    period_label: d(entry.date),
+    period_date: d(entry.date),
+    order_id: entry.orderId || null,
+    target: Number(entry.target),
+    actual: Number(entry.actual),
+    efficiency,
+    wip_received: Number(entry.wipReceived) || 0,
+    wip_passed_out: Number(entry.wipPassedOut) || 0,
+    remarks: entry.remarks || '',
+  }).select().single()
+  if (error) throw error
+  return data
+}
+
+export async function deleteSectionOutputEntry(id) {
+  const { error } = await supabase.from('section_output').delete().eq('id', id)
+  if (error) throw error
+}
+
+// ── Shipment Milestones ───────────────────────────────────────────────────────
 export async function fetchShipments() {
   const { data, error } = await supabase
     .from('orders')
-    .select(`*, shipment_milestones (id, name, milestone_date, done, sort_order)`)
-    .order('ship_date', { ascending: true })
+    .select(`*, shipment_milestones(id, name, milestone_date, actual_date, done, status, qty_shipped, remarks, sort_order)`)
+    .order('ship_date')
   if (error) throw error
-
   return data.map(row => ({
     ...toOrder(row),
     totalQty: row.qty,
-    shippedQty: row.status === 'completed'
-      ? row.qty
-      : Math.round(row.qty * row.progress / 100 * 0.6),
+    shippedQty: (row.shipment_milestones || []).find(m => m.name === 'Ex-Factory')?.qty_shipped || 0,
     milestones: (row.shipment_milestones || [])
       .sort((a, b) => a.sort_order - b.sort_order)
       .map(m => ({
         id: m.id,
         name: m.name,
-        date: new Date(m.milestone_date),
+        date: m.milestone_date ? new Date(m.milestone_date) : null,
+        actualDate: m.actual_date ? new Date(m.actual_date) : null,
         done: m.done,
+        status: m.status || 'pending',
+        qtyShipped: m.qty_shipped || 0,
+        remarks: m.remarks || '',
       })),
   }))
 }
 
-export async function updateMilestone(id, done) {
-  const { error } = await supabase
-    .from('shipment_milestones').update({ done }).eq('id', id)
+export async function updateMilestoneRecord(id, updates) {
+  const payload = {}
+  if (updates.actualDate !== undefined) payload.actual_date = d(updates.actualDate)
+  if (updates.done !== undefined) payload.done = updates.done
+  if (updates.status !== undefined) payload.status = updates.status
+  if (updates.qtyShipped !== undefined) payload.qty_shipped = Number(updates.qtyShipped)
+  if (updates.remarks !== undefined) payload.remarks = updates.remarks
+  const { error } = await supabase.from('shipment_milestones').update(payload).eq('id', id)
   if (error) throw error
 }
 
-// ── Seed helper (populates DB with mock data on first run) ────────────────────
+// ── Daily Line Output ─────────────────────────────────────────────────────────
+export async function fetchDailyLineOutput() {
+  const { data, error } = await supabase
+    .from('daily_line_output')
+    .select(`*, orders(id, order_no, buyer, color)`)
+    .order('date', { ascending: false })
+    .limit(200)
+  if (error) throw error
+  return data.map(row => ({
+    id: row.id,
+    date: new Date(row.date),
+    linePairNo: row.line_pair_no,
+    orderId: row.order_id,
+    orderNo: row.orders?.order_no || '',
+    buyer: row.orders?.buyer || '',
+    color: row.orders?.color || '#3b82f6',
+    targetPcs: row.target_pcs,
+    actualPcs: row.actual_pcs,
+    efficiency: row.target_pcs > 0 ? Math.round((row.actual_pcs / row.target_pcs) * 100) : 0,
+    workersPresent: row.workers_present || 0,
+    downtimeHours: row.downtime_hours || 0,
+    downtimeReason: row.downtime_reason || '',
+    remarks: row.remarks || '',
+  }))
+}
 
-export async function seedFromMock(mockOrders, mockCapacity, mockSectionOutput) {
-  // Seed orders
-  const { error: ordersErr } = await supabase
-    .from('orders')
-    .upsert(mockOrders.map(o => ({ ...fromOrder(o), id: o.id })), { onConflict: 'id' })
-  if (ordersErr) throw ordersErr
+export async function createDailyLineOutput(entry) {
+  const { data, error } = await supabase.from('daily_line_output').insert({
+    date: d(entry.date),
+    line_pair_no: Number(entry.linePairNo),
+    order_id: entry.orderId || null,
+    target_pcs: Number(entry.targetPcs),
+    actual_pcs: Number(entry.actualPcs),
+    workers_present: Number(entry.workersPresent) || 0,
+    downtime_hours: Number(entry.downtimeHours) || 0,
+    downtime_reason: entry.downtimeReason || '',
+    remarks: entry.remarks || '',
+  }).select().single()
+  if (error) throw error
+  return data
+}
 
-  // Seed milestones
-  const milestones = mockOrders.flatMap(o =>
-    (o.milestones || []).map((m, i) => ({
-      order_id: o.id,
-      name: m.name,
-      milestone_date: m.date instanceof Date ? m.date.toISOString().split('T')[0] : m.date,
-      done: m.done,
-      sort_order: i,
-    }))
-  )
-  if (milestones.length) {
-    const { error: msErr } = await supabase.from('shipment_milestones').upsert(milestones, { onConflict: 'id' })
-    if (msErr) throw msErr
-  }
-
-  // Seed capacity
-  const { error: capErr } = await supabase
-    .from('capacity_data')
-    .upsert(mockCapacity.map(c => ({
-      id: c.id,
-      week_label: c.weekLabel,
-      week_start: c.weekStart instanceof Date ? c.weekStart.toISOString().split('T')[0] : c.weekStart,
-      capacity_pcs: c.capacityPcs,
-      loaded_pcs: c.loadedPcs,
-      capacity_mins: c.capacityMins,
-      loaded_mins: c.loadedMins,
-      loading_pct: c.loadingPct,
-    })), { onConflict: 'id' })
-  if (capErr) throw capErr
-
-  // Seed section output
-  const sectionRows = mockSectionOutput.flatMap(s =>
-    [
-      ...s.daily.map(d => ({
-        section: s.section, period_type: 'daily',
-        period_label: d.date instanceof Date ? d.date.toISOString().split('T')[0] : String(d.date),
-        period_date: d.date instanceof Date ? d.date.toISOString().split('T')[0] : d.date,
-        target: d.target, actual: d.actual, efficiency: d.efficiency,
-      })),
-      ...s.weekly.map(d => ({
-        section: s.section, period_type: 'weekly',
-        period_label: d.week, period_date: null,
-        target: d.target, actual: d.actual, efficiency: d.efficiency,
-      })),
-      ...s.monthly.map(d => ({
-        section: s.section, period_type: 'monthly',
-        period_label: d.month, period_date: null,
-        target: d.target, actual: d.actual, efficiency: d.efficiency,
-      })),
-    ]
-  )
-  const { error: soErr } = await supabase.from('section_output').insert(sectionRows)
-  if (soErr && soErr.code !== '23505') throw soErr // ignore duplicate key
+export async function deleteDailyLineOutput(id) {
+  const { error } = await supabase.from('daily_line_output').delete().eq('id', id)
+  if (error) throw error
 }
