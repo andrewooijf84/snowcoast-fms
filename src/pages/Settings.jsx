@@ -44,6 +44,7 @@ export default function Settings() {
             {[
               { code: 'en', flag: '🇺🇸', name: 'English' },
               { code: 'vi', flag: '🇻🇳', name: 'Tiếng Việt' },
+              { code: 'zh', flag: '🇨🇳', name: '中文' },
             ].map(({ code, flag, name }) => (
               <button
                 key={code}
