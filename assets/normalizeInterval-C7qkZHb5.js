@@ -1,0 +1,1 @@
+import{s as e}from"./workingDays-DPWf9tn6.js";function t(t,n){let[r,i]=e(t,n.start,n.end);return{start:r,end:i}}export{t};
