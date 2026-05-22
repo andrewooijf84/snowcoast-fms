@@ -34,10 +34,10 @@ function toOrder(row) {
 function fromOrder(o) {
   return {
     order_no: o.orderNo,
-    style: o.style,
+    style: o.style || null,
     buyer: o.buyer,
-    qty: Number(o.qty),
-    smv: Number(o.smv),
+    qty: Number(o.qty) || 0,
+    smv: Number(o.smv) || null,
     start_date: d(o.startDate || o.cutStartDate),
     end_date: d(o.endDate || o.completionDate),
     ship_date: d(o.shipDate),

@@ -23,7 +23,14 @@ export const useAppStore = create(
       logout: () => set({ user: null }),
       getRole: () => {
         const u = get().user
-        return u?.role || u?.user_metadata?.role || 'viewer'
+        if (!u) return 'viewer'
+        // user_metadata.role is the custom role set in Supabase dashboard
+        const meta = u?.user_metadata?.role
+        if (meta && ['admin','planning','ie'].includes(meta)) return meta
+        // Demo mode: user object has role directly (not 'authenticated')
+        if (u.role && u.role !== 'authenticated') return u.role
+        // Authenticated Supabase user with no custom role → default admin
+        return 'admin'
       },
       canEdit: () => ['admin', 'planning'].includes(get().getRole()),
 
