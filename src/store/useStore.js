@@ -46,6 +46,15 @@ export const useAppStore = create(
       sectionOutputPeriod: 'daily',
       setSectionOutputPeriod: (v) => set({ sectionOutputPeriod: v }),
 
+      // ── Factory Config ──────────────────────────────────────────────────
+      factoryConfig: {
+        totalLinePairs: 20,
+        workingHoursPerDay: 8,
+        operatorsPerLine: 25,
+        defaultEfficiency: 85,
+      },
+      setFactoryConfig: (cfg) => set(s => ({ factoryConfig: { ...s.factoryConfig, ...cfg } })),
+
       // ── Loading / Error ─────────────────────────────────────────────────
       loading: {},
       errors: {},
@@ -174,7 +183,7 @@ export const useAppStore = create(
     }),
     {
       name: 'fms-v2',
-      partialize: s => ({ language: s.language, sidebarOpen: s.sidebarOpen, masterPlanView: s.masterPlanView }),
+      partialize: s => ({ language: s.language, sidebarOpen: s.sidebarOpen, masterPlanView: s.masterPlanView, factoryConfig: s.factoryConfig }),
     }
   )
 )
