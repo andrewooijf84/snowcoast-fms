@@ -3,7 +3,16 @@
     "allow": [
       "Bash(npm run *)",
       "Bash(curl -s http://localhost:5173/snowcoast-fms/)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(curl -s https://tygbsanxrapenqjozcvv.supabase.co/rest/v1/orders?limit=1 -H 'apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5Z2JzYW54cmFwZW5xam96Y3Z2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkzNjgzMDcsImV4cCI6MjA5NDk0NDMwN30.FnTOZ9y53-b2KeTYUjthJu_KDqvn9CtxhTnBlR-AcvY' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5Z2JzYW54cmFwZW5xam96Y3Z2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkzNjgzMDcsImV4cCI6MjA5NDk0NDMwN30.FnTOZ9y53-b2KeTYUjthJu_KDqvn9CtxhTnBlR-AcvY')",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -s https://tygbsanxrapenqjozcvv.supabase.co/rest/v1/ -H 'apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5Z2JzYW54cmFwZW5xam96Y3Z2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkzNjgzMDcsImV4cCI6MjA5NDk0NDMwN30.FnTOZ9y53-b2KeTYUjthJu_KDqvn9CtxhTnBlR-AcvY' -H 'Accept: application/openapi+json')",
+      "Bash(curl -s -I https://tygbsanxrapenqjozcvv.supabase.co/rest/v1/orders -H 'apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5Z2JzYW54cmFwZW5xam96Y3Z2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkzNjgzMDcsImV4cCI6MjA5NDk0NDMwN30.FnTOZ9y53-b2KeTYUjthJu_KDqvn9CtxhTnBlR-AcvY' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5Z2JzYW54cmFwZW5xam96Y3Z2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkzNjgzMDcsImV4cCI6MjA5NDk0NDMwN30.FnTOZ9y53-b2KeTYUjthJu_KDqvn9CtxhTnBlR-AcvY')",
+      "Bash(curl -s https://tygbsanxrapenqjozcvv.supabase.co/rest/v1/orders -H 'apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5Z2JzYW54cmFwZW5xam96Y3Z2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkzNjgzMDcsImV4cCI6MjA5NDk0NDMwN30.FnTOZ9y53-b2KeTYUjthJu_KDqvn9CtxhTnBlR-AcvY' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5Z2JzYW54cmFwZW5xam96Y3Z2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkzNjgzMDcsImV4cCI6MjA5NDk0NDMwN30.FnTOZ9y53-b2KeTYUjthJu_KDqvn9CtxhTnBlR-AcvY' -H 'Content-Type: application/json' -H 'Prefer: return=minimal' -X POST -d '{\"order_no\":\"TEST-COL-CHECK\",\"style\":\"x\",\"buyer\":\"x\",\"qty\":1,\"smv\":1,\"start_date\":\"2026-01-01\",\"end_date\":\"2026-01-01\",\"ship_date\":\"2026-01-01\"}')",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(npm install *)"
     ]
   }
 }

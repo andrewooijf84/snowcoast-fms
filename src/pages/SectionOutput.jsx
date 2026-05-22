@@ -2,8 +2,9 @@ import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { format, getISOWeek } from 'date-fns'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
-import { Plus, Trash2 } from 'lucide-react'
+import { Plus, Trash2, FileUp } from 'lucide-react'
 import { useAppStore } from '@/store/useStore'
+import OutputImportModal from '@/components/import/OutputImportModal'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -228,8 +229,10 @@ function SectionCard({ section, rows, period, orders, sectionOutputRows }) {
 
 // ── Page ───────────────────────────────────────────────────────────────────────
 export default function SectionOutput() {
-  const { sectionOutputRows, orders, dailyLineOutput, addSectionOutput, removeSectionOutput, sectionOutputPeriod, setSectionOutputPeriod, loading, errors, canEdit } = useAppStore()
+  const { sectionOutputRows, orders, dailyLineOutput, addSectionOutput, removeSectionOutput, fetchAll, fetchSectionOutput, fetchDailyOutput, sectionOutputPeriod, setSectionOutputPeriod, loading, errors, canEdit, getRole } = useAppStore()
   const [showForm, setShowForm] = useState(false)
+  const [showImport, setShowImport] = useState(false)
+  const canImportOutput = ['admin', 'ie'].includes(getRole())
 
   const editable = canEdit()
 
@@ -312,9 +315,18 @@ export default function SectionOutput() {
           ))}
         </div>
         <div className="ml-auto">
-          <Button size="sm" onClick={() => setShowForm(true)}>
-            <Plus className="w-4 h-4" />Add Output
-          </Button>
+          <div className="flex gap-2">
+            {canImportOutput && (
+              <Button size="sm" variant="outline" onClick={() => setShowImport(true)}>
+                <FileUp className="w-4 h-4" />Import Output
+              </Button>
+            )}
+            {editable && (
+              <Button size="sm" onClick={() => setShowForm(true)}>
+                <Plus className="w-4 h-4" />Add Output
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -393,6 +405,7 @@ export default function SectionOutput() {
       )}
 
       <OutputForm open={showForm} onClose={() => setShowForm(false)} orders={orders} onSave={addSectionOutput} />
+      <OutputImportModal open={showImport} onClose={() => setShowImport(false)} onImportDone={() => { setShowImport(false); fetchSectionOutput(); fetchDailyOutput() }} />
     </div>
   )
 }

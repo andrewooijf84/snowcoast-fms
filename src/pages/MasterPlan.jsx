@@ -4,7 +4,7 @@ import {
   format, differenceInDays, startOfMonth, endOfMonth,
   eachDayOfInterval, isWeekend,
 } from 'date-fns'
-import { Plus, BarChart2, Table2, ChevronLeft, ChevronRight, Pencil, Trash2, AlertTriangle } from 'lucide-react'
+import { Plus, BarChart2, Table2, ChevronLeft, ChevronRight, Pencil, Trash2, AlertTriangle, FileUp } from 'lucide-react'
 import { useAppStore } from '@/store/useStore'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { PageSpinner, InlineError } from '@/components/ui/spinner'
 import OrderForm, { toEditForm, BLANK_ORDER } from '@/components/OrderForm'
+import OrderImportModal from '@/components/import/OrderImportModal'
 import { LINES } from '@/data/mockData'
 import { shipmentGapWorkingDays } from '@/lib/workingDays'
 
@@ -246,11 +247,12 @@ function OrderTable({ orders, onEdit, onDelete, canEdit }) {
 
 // ── Page ───────────────────────────────────────────────────────────────────────
 export default function MasterPlan() {
-  const { orders, masterPlanView, setMasterPlanView, addOrder, updateOrder, deleteOrder, loading, errors, canEdit } = useAppStore()
+  const { orders, masterPlanView, setMasterPlanView, addOrder, updateOrder, deleteOrder, fetchAll, loading, errors, canEdit } = useAppStore()
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState(null)
+  const [showImport, setShowImport] = useState(false)
 
   const editable = canEdit()
 
@@ -301,11 +303,18 @@ export default function MasterPlan() {
               </button>
             ))}
           </div>
-          {editable && (
-            <Button size="sm" onClick={() => { setEditing(null); setShowForm(true) }}>
-              <Plus className="w-4 h-4" />New Order
-            </Button>
-          )}
+          <div className="flex gap-2">
+            {editable && (
+              <Button size="sm" variant="outline" onClick={() => setShowImport(true)}>
+                <FileUp className="w-4 h-4" />Import Orders
+              </Button>
+            )}
+            {editable && (
+              <Button size="sm" onClick={() => { setEditing(null); setShowForm(true) }}>
+                <Plus className="w-4 h-4" />New Order
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -329,6 +338,7 @@ export default function MasterPlan() {
       </Card>
 
       <OrderForm open={showForm} onClose={() => setShowForm(false)} initial={editing} onSave={handleSave} />
+      <OrderImportModal open={showImport} onClose={() => setShowImport(false)} onImportDone={() => { setShowImport(false); fetchAll() }} />
     </div>
   )
 }

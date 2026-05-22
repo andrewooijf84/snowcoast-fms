@@ -316,3 +316,63 @@ export async function deleteDailyLineOutput(id) {
   const { error } = await supabase.from('daily_line_output').delete().eq('id', id)
   if (error) throw error
 }
+
+export async function updateDailyLineOutput(id, entry) {
+  const { error } = await supabase.from('daily_line_output').update({
+    target_pcs: Number(entry.targetPcs),
+    actual_pcs: Number(entry.actualPcs),
+    workers_present: Number(entry.workersPresent) || 0,
+    downtime_hours: Number(entry.downtimeHours) || 0,
+    downtime_reason: entry.downtimeReason || '',
+    remarks: entry.remarks || '',
+  }).eq('id', id)
+  if (error) throw error
+}
+
+export async function updateSectionOutputEntry(id, entry) {
+  const efficiency = entry.targetPcs > 0 ? Math.round((entry.actualPcs / entry.targetPcs) * 100) : 0
+  const { error } = await supabase.from('section_output').update({
+    target: Number(entry.targetPcs),
+    actual: Number(entry.actualPcs),
+    efficiency,
+    wip_received: Number(entry.wipReceived) || 0,
+    wip_passed_out: Number(entry.wipPassedOut) || 0,
+    remarks: entry.remarks || '',
+  }).eq('id', id)
+  if (error) throw error
+}
+
+// ── Import helpers ─────────────────────────────────────────────────────────────
+
+export async function fetchExistingOrderNos(nos) {
+  if (!nos.length) return []
+  const { data, error } = await supabase.from('orders').select('id, order_no').in('order_no', nos)
+  if (error) throw error
+  return data
+}
+
+export async function fetchOrderNoMap() {
+  const { data, error } = await supabase.from('orders').select('id, order_no')
+  if (error) throw error
+  return Object.fromEntries(data.map(r => [r.order_no, r.id]))
+}
+
+export async function fetchExistingDailyOutput(dates) {
+  if (!dates.length) return []
+  const { data, error } = await supabase
+    .from('daily_line_output')
+    .select('id, date, line_pair_no, order_id')
+    .in('date', dates)
+  if (error) throw error
+  return data
+}
+
+export async function fetchExistingSectionOutput(dates) {
+  if (!dates.length) return []
+  const { data, error } = await supabase
+    .from('section_output')
+    .select('id, period_date, section, order_id')
+    .in('period_date', dates)
+  if (error) throw error
+  return data
+}
