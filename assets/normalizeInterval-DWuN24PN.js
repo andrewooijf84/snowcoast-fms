@@ -1,0 +1,1 @@
+import{i as e}from"./format-BndV0CE1.js";function t(t,n){let[r,i]=e(t,n.start,n.end);return{start:r,end:i}}export{t};
