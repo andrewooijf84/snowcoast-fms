@@ -376,3 +376,176 @@ export async function fetchExistingSectionOutput(dates) {
   if (error) throw error
   return data
 }
+
+// ── Section Output page — date-scoped queries ─────────────────────────────────
+
+export async function fetchSectionOutputByDate(dateStr) {
+  const { data, error } = await supabase
+    .from('section_output')
+    .select('*, orders(id, order_no, buyer, style, smv, qty, completion_date)')
+    .eq('period_date', dateStr)
+  if (error) throw error
+  return data.map(row => ({
+    id: row.id,
+    section: row.section,
+    orderId: row.order_id,
+    orderNo: row.orders?.order_no || '',
+    style: row.orders?.style || '',
+    buyer: row.orders?.buyer || '',
+    target: row.target || 0,
+    actual: row.actual || 0,
+    efficiency: row.efficiency || 0,
+    wipReceived: row.wip_received || 0,
+    wipPassedOut: row.wip_passed_out || 0,
+    remarks: row.remarks || '',
+  }))
+}
+
+export async function fetchSectionHeadcountByDate(dateStr) {
+  const { data, error } = await supabase
+    .from('section_headcount')
+    .select('*')
+    .eq('output_date', dateStr)
+  if (error) throw error
+  return data.map(row => ({
+    id: row.id,
+    section: row.section,
+    headcount: row.headcount || 0,
+    workingHours: row.working_hours || null,
+    efficiencyPct: row.efficiency_pct || null,
+  }))
+}
+
+export async function fetchDailyLineOutputByDate(dateStr) {
+  const { data, error } = await supabase
+    .from('daily_line_output')
+    .select('*, orders(id, order_no, buyer, style, smv, qty, completion_date)')
+    .eq('date', dateStr)
+  if (error) throw error
+  // Only return rows that have a line_name (new format)
+  return data
+    .filter(row => row.line_name)
+    .map(row => ({
+      id: row.id,
+      date: dateStr,
+      lineName: row.line_name,
+      linePairNo: row.line_pair_no,
+      orderId: row.order_id,
+      orderNo: row.orders?.order_no || '',
+      style: row.orders?.style || '',
+      buyer: row.orders?.buyer || '',
+      smv: parseFloat(row.orders?.smv) || 0,
+      orderQty: row.orders?.qty || 0,
+      targetPcs: row.target_pcs || 0,
+      actualPcs: row.actual_pcs || 0,
+      workersPresent: row.workers_present || 0,
+      workingHours: row.working_hours || null,
+      efficiencyPct: row.efficiency_pct !== null && row.efficiency_pct !== undefined
+        ? row.efficiency_pct
+        : (row.target_pcs > 0 ? Math.round(row.actual_pcs / row.target_pcs * 100) : 0),
+      downtimeHours: row.downtime_hours || 0,
+      downtimeReason: row.downtime_reason || '',
+      wipReceived: row.wip_received || 0,
+      wipPassedOut: row.wip_passed_out || 0,
+      remarks: row.remarks || '',
+    }))
+}
+
+export async function fetchOrderProgressAll() {
+  const { data, error } = await supabase
+    .from('daily_line_output')
+    .select('order_id, actual_pcs')
+  if (error) throw error
+  const progress = {}
+  data.forEach(row => {
+    if (!row.order_id) return
+    progress[row.order_id] = (progress[row.order_id] || 0) + (row.actual_pcs || 0)
+  })
+  return progress
+}
+
+export async function fetchLineCumulativeByOrder() {
+  const { data, error } = await supabase
+    .from('daily_line_output')
+    .select('order_id, line_name, actual_pcs')
+  if (error) throw error
+  const result = {}
+  data.forEach(row => {
+    if (!row.order_id || !row.line_name) return
+    const key = `${row.line_name}_${row.order_id}`
+    result[key] = (result[key] || 0) + (row.actual_pcs || 0)
+  })
+  return result
+}
+
+// Upsert section output (insert, fallback to update on 23505 duplicate)
+export async function upsertSectionOutputEntry(entry) {
+  const efficiency = entry.target > 0 ? Math.round((entry.actual / entry.target) * 100) : 0
+  const payload = {
+    period_date: entry.date, period_type: 'daily', period_label: entry.date,
+    section: entry.section, order_id: entry.orderId || null,
+    target: Number(entry.target) || 0, actual: Number(entry.actual) || 0, efficiency,
+    wip_received: Number(entry.wipReceived) || 0,
+    wip_passed_out: Number(entry.wipPassedOut) || 0,
+    remarks: entry.remarks || '',
+  }
+  const { error } = await supabase.from('section_output').insert(payload)
+  if (error) {
+    if (error.code === '23505') {
+      let q = supabase.from('section_output').update({
+        target: payload.target, actual: payload.actual, efficiency,
+        wip_received: payload.wip_received, wip_passed_out: payload.wip_passed_out,
+        remarks: payload.remarks,
+      }).eq('period_date', entry.date).eq('section', entry.section)
+      q = entry.orderId ? q.eq('order_id', entry.orderId) : q.is('order_id', null)
+      const { error: e2 } = await q
+      if (e2) throw e2
+    } else throw error
+  }
+}
+
+// Upsert section headcount (section_headcount is a new table with UNIQUE constraint)
+export async function upsertSectionHeadcountEntry(entry) {
+  const { error } = await supabase.from('section_headcount').upsert({
+    output_date: entry.date,
+    section: entry.section,
+    headcount: Number(entry.headcount) || 0,
+    working_hours: Number(entry.workingHours) || null,
+    efficiency_pct: Number(entry.efficiencyPct) || null,
+  }, { onConflict: 'output_date,section' })
+  if (error) throw error
+}
+
+// Upsert daily line output with line_name (insert, fallback to update on 23505)
+export async function upsertLineOutputEntry(entry) {
+  const linePairNo = entry.lineName ? parseInt(entry.lineName.split('-')[1]) : null
+  const payload = {
+    date: entry.date, line_name: entry.lineName, line_pair_no: linePairNo,
+    order_id: entry.orderId || null,
+    target_pcs: Number(entry.targetPcs) || 0,
+    actual_pcs: Number(entry.actualPcs) || 0,
+    workers_present: Number(entry.workersPresent) || 0,
+    working_hours: Number(entry.workingHours) || null,
+    efficiency_pct: Number(entry.efficiencyPct) || null,
+    downtime_hours: Number(entry.downtimeHours) || 0,
+    downtime_reason: entry.downtimeReason || '',
+    wip_received: Number(entry.wipReceived) || 0,
+    wip_passed_out: Number(entry.wipPassedOut) || 0,
+    remarks: entry.remarks || '',
+  }
+  const { error } = await supabase.from('daily_line_output').insert(payload)
+  if (error) {
+    if (error.code === '23505') {
+      let q = supabase.from('daily_line_output').update({
+        target_pcs: payload.target_pcs, actual_pcs: payload.actual_pcs,
+        workers_present: payload.workers_present, working_hours: payload.working_hours,
+        efficiency_pct: payload.efficiency_pct, downtime_hours: payload.downtime_hours,
+        downtime_reason: payload.downtime_reason, wip_received: payload.wip_received,
+        wip_passed_out: payload.wip_passed_out, remarks: payload.remarks,
+      }).eq('date', entry.date).eq('line_name', entry.lineName)
+      q = entry.orderId ? q.eq('order_id', entry.orderId) : q.is('order_id', null)
+      const { error: e2 } = await q
+      if (e2) throw e2
+    } else throw error
+  }
+}
