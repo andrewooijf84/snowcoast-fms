@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import {
   LayoutDashboard, CalendarDays, Gauge, Map, BarChart3,
-  Truck, Settings, ChevronLeft, ChevronRight, Snowflake
+  Truck, Settings, ChevronLeft, ChevronRight, Snowflake, FileText
 } from 'lucide-react'
 import { useAppStore } from '@/store/useStore'
 import { cn } from '@/lib/utils'
@@ -14,6 +14,7 @@ const navItems = [
   { key: 'lineMap', icon: Map, to: '/line-map' },
   { key: 'sectionOutput', icon: BarChart3, to: '/section-output' },
   { key: 'shipmentSchedule', icon: Truck, to: '/shipment-schedule' },
+  { key: 'reports', icon: FileText, to: '/reports' },
 ]
 
 export default function Sidebar() {
