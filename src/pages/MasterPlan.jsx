@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   format, differenceInDays, startOfMonth, endOfMonth,
@@ -15,6 +15,7 @@ import OrderForm, { toEditForm, BLANK_ORDER } from '@/components/OrderForm'
 import OrderImportModal from '@/components/import/OrderImportModal'
 import { LINES } from '@/data/mockData'
 import { shipmentGapWorkingDays } from '@/lib/workingDays'
+import { fetchOrderProgressAll } from '@/lib/api'
 
 const STATUS_CFG = {
   active:    { label: 'Active',    variant: 'info' },
@@ -50,7 +51,7 @@ function ShipmentGapIcon({ order }) {
 }
 
 // ── Gantt chart ────────────────────────────────────────────────────────────────
-function GanttChart({ orders, onEdit, canEdit }) {
+function GanttChart({ orders, onEdit, canEdit, orderProgress }) {
   const [viewDate, setViewDate] = useState(new Date())
   const days = useMemo(() => eachDayOfInterval({ start: startOfMonth(viewDate), end: endOfMonth(viewDate) }), [viewDate])
   const monthStart = startOfMonth(viewDate)
@@ -128,14 +129,22 @@ function GanttChart({ orders, onEdit, canEdit }) {
                   <div key={day.toISOString()} style={{ width: DW }}
                     className={`h-full flex-shrink-0 border-r border-slate-50 ${isWeekend(day) ? 'bg-slate-50' : ''} ${format(day,'yyyy-MM-dd') === todayStr ? 'bg-blue-50' : ''}`} />
                 ))}
-                {b && (
-                  <div className="gantt-bar absolute top-1 rounded-md flex items-center px-2"
-                    style={{ left: b.left, width: b.width - 2, height: 24, background: order.color }}>
-                    <span className="text-white text-xs font-medium truncate">
-                      {order.qty ? order.qty.toLocaleString() + 'p' : order.orderNo}
-                    </span>
-                  </div>
-                )}
+                {b && (() => {
+                  const cumActual = orderProgress[order.id] || 0
+                  const pct = order.qty > 0 ? Math.min(100, Math.round(cumActual / order.qty * 100)) : (order.progress || 0)
+                  return (
+                    <div className="gantt-bar absolute top-1 rounded-md overflow-hidden flex items-center"
+                      style={{ left: b.left, width: b.width - 2, height: 24, background: order.color + '55' }}>
+                      {/* Progress fill */}
+                      <div className="absolute top-0 left-0 h-full rounded-md"
+                        style={{ width: `${pct}%`, background: order.color }} />
+                      <span className="relative text-white text-xs font-bold px-2 truncate drop-shadow">
+                        {order.qty ? order.qty.toLocaleString() + 'p' : order.orderNo}
+                        {cumActual > 0 && <span className="ml-1 opacity-80 text-xs">· {pct}%</span>}
+                      </span>
+                    </div>
+                  )
+                })()}
                 {(() => {
                   const ship = order.shipDate ? new Date(order.shipDate) : null
                   if (ship && ship >= monthStart && ship <= monthEnd) {
@@ -153,8 +162,46 @@ function GanttChart({ orders, onEdit, canEdit }) {
   )
 }
 
+// ── Progress cell (auto-calculated from daily output) ─────────────────────────
+function OrderProgressCell({ order, orderProgress }) {
+  const cumActual = orderProgress[order.id] || 0
+  const qty = order.qty || 0
+
+  // If we have real output data, show it; otherwise fall back to manual progress
+  if (cumActual > 0 && qty > 0) {
+    const pct = Math.min(100, Math.round(cumActual / qty * 100))
+    const color = pct >= 75 ? '#22c55e' : pct >= 40 ? '#f59e0b' : '#ef4444'
+    const textColor = pct >= 75 ? 'text-green-700' : pct >= 40 ? 'text-amber-600' : 'text-red-600'
+    return (
+      <div className="space-y-1 min-w-[130px]">
+        <div className="flex items-center gap-1.5">
+          <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+          </div>
+          <span className={`text-xs font-bold ${textColor}`}>{pct}%</span>
+        </div>
+        <p className="text-xs text-slate-500">
+          {cumActual.toLocaleString()} / {qty.toLocaleString()} pcs
+        </p>
+      </div>
+    )
+  }
+
+  // No output data — show manual progress with muted style
+  const pct = order.progress || 0
+  return (
+    <div className="space-y-1 min-w-[90px]">
+      <div className="flex items-center gap-1.5">
+        <Progress value={pct} className="flex-1 h-1.5" />
+        <span className="text-xs text-slate-400">{pct}%</span>
+      </div>
+      <p className="text-xs text-slate-400 italic">manual</p>
+    </div>
+  )
+}
+
 // ── Table view ─────────────────────────────────────────────────────────────────
-function OrderTable({ orders, onEdit, onDelete, canEdit }) {
+function OrderTable({ orders, onEdit, onDelete, canEdit, orderProgress }) {
   return (
     <div className="overflow-auto">
       {orders.length === 0 && (
@@ -164,7 +211,7 @@ function OrderTable({ orders, onEdit, onDelete, canEdit }) {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-slate-200">
-              {['Order No', 'Customer', 'Style', 'Season', 'Qty', 'SMV', 'Completion', 'Ex-Factory', 'Lines', 'Progress', 'Status', ''].map(h => (
+              {['Order No', 'Customer', 'Style', 'Season', 'Qty', 'SMV', 'Completion', 'Ex-Factory', 'Lines', 'Output Progress', 'Status', ''].map(h => (
                 <th key={h} className="text-left py-2 px-3 text-xs font-semibold text-slate-500 uppercase whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -214,11 +261,8 @@ function OrderTable({ orders, onEdit, onDelete, canEdit }) {
                     <span className="bg-slate-100 px-1 rounded">{o.componentLine}</span>
                     {' '}<span className="bg-blue-50 text-blue-700 px-1 rounded">{o.assemblyLine}</span>
                   </td>
-                  <td className="py-2.5 px-3 min-w-[90px]">
-                    <div className="flex items-center gap-1.5">
-                      <Progress value={o.progress} className="flex-1 h-1.5" />
-                      <span className="text-xs text-slate-400">{o.progress}%</span>
-                    </div>
+                  <td className="py-2.5 px-3">
+                    <OrderProgressCell order={o} orderProgress={orderProgress} />
                   </td>
                   <td className="py-2.5 px-3"><Badge variant={cfg.variant}>{cfg.label}</Badge></td>
                   <td className="py-2.5 px-3">
@@ -253,8 +297,14 @@ export default function MasterPlan() {
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState(null)
   const [showImport, setShowImport] = useState(false)
+  const [orderProgress, setOrderProgress] = useState({})
 
   const editable = canEdit()
+
+  // Load cumulative output per order (auto-progress)
+  useEffect(() => {
+    fetchOrderProgressAll().then(setOrderProgress).catch(() => {})
+  }, [])
 
   const filtered = useMemo(() => orders.filter(o => {
     const q = search.toLowerCase()
@@ -332,8 +382,8 @@ export default function MasterPlan() {
       <Card>
         <CardContent className="pt-5">
           {masterPlanView === 'gantt'
-            ? <GanttChart orders={filtered} onEdit={openEdit} canEdit={editable} />
-            : <OrderTable orders={filtered} onEdit={openEdit} onDelete={handleDelete} canEdit={editable} />}
+            ? <GanttChart orders={filtered} onEdit={openEdit} canEdit={editable} orderProgress={orderProgress} />
+            : <OrderTable orders={filtered} onEdit={openEdit} onDelete={handleDelete} canEdit={editable} orderProgress={orderProgress} />}
         </CardContent>
       </Card>
 
