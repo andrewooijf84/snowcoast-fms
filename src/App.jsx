@@ -13,6 +13,7 @@ const SectionOutput = lazy(() => import('@/pages/SectionOutput'))
 const ShipmentSchedule = lazy(() => import('@/pages/ShipmentSchedule'))
 const Settings = lazy(() => import('@/pages/Settings'))
 const Reports = lazy(() => import('@/pages/Reports'))
+const CustomerVisits = lazy(() => import('@/pages/CustomerVisits'))
 
 function PageLoader() {
   return (
@@ -41,6 +42,7 @@ function AppWithInit() {
       <Route path="/shipment-schedule" element={<ProtectedRoute><ShipmentSchedule /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
       <Route path="/reports" element={<ProtectedRoute><Reports /></ProtectedRoute>} />
+      <Route path="/customer-visits" element={<ProtectedRoute><CustomerVisits /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
