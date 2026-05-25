@@ -478,6 +478,27 @@ export async function fetchLineCumulativeByOrder() {
   return result
 }
 
+// ── Clear All Data ─────────────────────────────────────────────────────────────
+// Deletes every row from every application table. Order matters: children first.
+export async function clearAllData() {
+  const tables = [
+    'visit_itinerary',
+    'visit_visitors',
+    'customer_visits',
+    'section_headcount',
+    'section_output',
+    'daily_line_output',
+    'shipment_milestones',
+    'line_allocations',
+    'orders',
+  ]
+  for (const table of tables) {
+    // .not('id','is',null) matches every row regardless of whether id is uuid or integer
+    const { error } = await supabase.from(table).delete().not('id', 'is', null)
+    if (error) throw new Error(`Failed to clear ${table}: ${error.message}`)
+  }
+}
+
 // Upsert section output (insert, fallback to update on 23505 duplicate)
 export async function upsertSectionOutputEntry(entry) {
   const efficiency = entry.target > 0 ? Math.round((entry.actual / entry.target) * 100) : 0

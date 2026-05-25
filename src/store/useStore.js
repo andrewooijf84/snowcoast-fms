@@ -6,6 +6,7 @@ import {
   fetchSectionOutputRows, createSectionOutputEntry, deleteSectionOutputEntry,
   fetchShipments, updateMilestoneRecord,
   fetchDailyLineOutput, createDailyLineOutput, deleteDailyLineOutput,
+  clearAllData as apiClearAllData,
 } from '../lib/api'
 import { LINES } from '../data/mockData'
 
@@ -179,6 +180,18 @@ export const useAppStore = create(
       removeDailyOutput: async (id) => {
         await deleteDailyLineOutput(id)
         set(s => ({ dailyLineOutput: s.dailyLineOutput.filter(r => r.id !== id) }))
+      },
+
+      // ── Clear All Data ───────────────────────────────────────────────────
+      clearAllData: async () => {
+        await apiClearAllData()
+        set({
+          orders: [],
+          lineAllocations: [],
+          sectionOutputRows: [],
+          shipments: [],
+          dailyLineOutput: [],
+        })
       },
     }),
     {
