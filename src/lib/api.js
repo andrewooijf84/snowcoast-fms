@@ -3,8 +3,73 @@ import { supabase } from './supabase'
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const d = (v) => (v instanceof Date ? v.toISOString().split('T')[0] : v || null)
 
+const minDate = (dates) => {
+  const valid = dates.filter(Boolean).map(x => new Date(x))
+  return valid.length ? new Date(Math.min(...valid.map(dt => dt.getTime()))) : null
+}
+const maxDate = (dates) => {
+  const valid = dates.filter(Boolean).map(x => new Date(x))
+  return valid.length ? new Date(Math.max(...valid.map(dt => dt.getTime()))) : null
+}
+
+// ── Portion transformers ──────────────────────────────────────────────────────
+function toPortion(p) {
+  return {
+    id: p.id,
+    orderId: p.order_id,
+    portionName: p.portion_name,
+    portionQty: p.portion_qty || 0,
+    sortOrder: p.sort_order || 1,
+    status: p.status || 'pending',
+    notes: p.notes || '',
+    materialArrivalDate: p.date_material_arrival ? new Date(p.date_material_arrival) : null,
+    cutStartDate:  p.date_cut_start   ? new Date(p.date_cut_start)   : null,
+    embStartDate:  p.date_emb_start   ? new Date(p.date_emb_start)   : null,
+    sewStartDate:  p.date_sew_start   ? new Date(p.date_sew_start)   : null,
+    completionDate: p.date_completion ? new Date(p.date_completion)  : null,
+    exfactoryDate: p.date_exfactory   ? new Date(p.date_exfactory)   : null,
+  }
+}
+
+function fromPortion(p, orderId, sortOrder) {
+  return {
+    order_id:              orderId,
+    portion_name:          p.portionName || 'Full order',
+    portion_qty:           Number(p.portionQty) || 0,
+    sort_order:            sortOrder !== undefined ? sortOrder : (p.sortOrder || 1),
+    date_material_arrival: d(p.materialArrivalDate),
+    date_cut_start:        d(p.cutStartDate),
+    date_emb_start:        d(p.embStartDate),
+    date_sew_start:        d(p.sewStartDate),
+    date_completion:       d(p.completionDate),
+    date_exfactory:        d(p.exfactoryDate),
+    status:                p.status || 'pending',
+    notes:                 p.notes || '',
+  }
+}
+
 // ── Order transformers ────────────────────────────────────────────────────────
 function toOrder(row) {
+  const portionRows = row.order_portions
+  const portions = portionRows
+    ? [...portionRows].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)).map(toPortion)
+    : []
+
+  // Derive aggregate dates from portions (fall back to legacy order columns)
+  const sewStarts   = portions.map(p => p.sewStartDate).filter(Boolean)
+  const exfactories = portions.map(p => p.exfactoryDate).filter(Boolean)
+  const completions = portions.map(p => p.completionDate).filter(Boolean)
+  const matArrivals = portions.map(p => p.materialArrivalDate).filter(Boolean)
+  const cutStarts   = portions.map(p => p.cutStartDate).filter(Boolean)
+  const embStarts   = portions.map(p => p.embStartDate).filter(Boolean)
+
+  const shipDate         = maxDate(exfactories)  || (row.ship_date             ? new Date(row.ship_date)             : null)
+  const completionDate   = maxDate(completions)  || (row.completion_date       ? new Date(row.completion_date)       : null)
+  const materialArrivalDate = minDate(matArrivals) || (row.material_arrival_date ? new Date(row.material_arrival_date) : null)
+  const cutStartDate     = minDate(cutStarts)    || (row.cut_start_date        ? new Date(row.cut_start_date)        : null)
+  const sewStartDate     = minDate(sewStarts)    || (row.sew_start_date        ? new Date(row.sew_start_date)        : null)
+  const embStartDate     = minDate(embStarts)    || (row.emb_start_date        ? new Date(row.emb_start_date)        : null)
+
   return {
     id: row.id,
     orderNo: row.order_no,
@@ -12,72 +77,171 @@ function toOrder(row) {
     buyer: row.buyer,
     qty: row.qty,
     smv: parseFloat(row.smv),
-    startDate: row.start_date ? new Date(row.start_date) : null,
-    endDate: row.end_date ? new Date(row.end_date) : null,
-    shipDate: row.ship_date ? new Date(row.ship_date) : null,
+    startDate: row.start_date ? new Date(row.start_date) : cutStartDate,
+    endDate:   row.end_date   ? new Date(row.end_date)   : completionDate,
+    shipDate,
     status: row.status,
     progress: row.progress,
     componentLine: row.component_line,
-    assemblyLine: row.assembly_line,
+    assemblyLine:  row.assembly_line,
     requiresEmbroidery: row.requires_embroidery,
     color: row.color || '#3b82f6',
     notes: row.notes || '',
     season: row.season || '',
-    materialArrivalDate: row.material_arrival_date ? new Date(row.material_arrival_date) : null,
-    cutStartDate: row.cut_start_date ? new Date(row.cut_start_date) : null,
-    embStartDate: row.emb_start_date ? new Date(row.emb_start_date) : null,
-    sewStartDate: row.sew_start_date ? new Date(row.sew_start_date) : null,
-    completionDate: row.completion_date ? new Date(row.completion_date) : null,
+    // Derived dates (for backward compat)
+    materialArrivalDate,
+    cutStartDate,
+    embStartDate,
+    sewStartDate,
+    completionDate,
+    // Gantt span
+    earliestSewStart: minDate(sewStarts) || sewStartDate,
+    latestExfactory:  maxDate(exfactories) || shipDate,
+    // Portions
+    portions,
   }
 }
 
 function fromOrder(o) {
+  const portions = o.portions || []
+  const gMin = (fn) => minDate(portions.map(fn).filter(Boolean))
+  const gMax = (fn) => maxDate(portions.map(fn).filter(Boolean))
+
+  const shipDate       = gMax(p => p.exfactoryDate)       || o.shipDate
+  const completionDate = gMax(p => p.completionDate)      || o.completionDate
+  const cutStartDate   = gMin(p => p.cutStartDate)        || o.cutStartDate
+  const sewStartDate   = gMin(p => p.sewStartDate)        || o.sewStartDate
+  const matDate        = gMin(p => p.materialArrivalDate) || o.materialArrivalDate
+  const embDate        = gMin(p => p.embStartDate)        || o.embStartDate
+
   return {
-    order_no: o.orderNo,
-    style: o.style || null,
-    buyer: o.buyer,
-    qty: Number(o.qty) || 0,
-    smv: Number(o.smv) || null,
-    start_date: d(o.startDate || o.cutStartDate),
-    end_date: d(o.endDate || o.completionDate),
-    ship_date: d(o.shipDate),
-    status: o.status || 'pending',
-    progress: Number(o.progress) || 0,
-    component_line: o.componentLine,
-    assembly_line: o.assemblyLine,
-    requires_embroidery: !!o.requiresEmbroidery,
-    color: o.color || '#3b82f6',
-    notes: o.notes || '',
-    season: o.season || '',
-    material_arrival_date: d(o.materialArrivalDate),
-    cut_start_date: d(o.cutStartDate),
-    emb_start_date: o.requiresEmbroidery ? d(o.embStartDate) : null,
-    sew_start_date: d(o.sewStartDate),
-    completion_date: d(o.completionDate),
+    order_no:              o.orderNo,
+    style:                 o.style || null,
+    buyer:                 o.buyer,
+    qty:                   Number(o.qty) || 0,
+    smv:                   Number(o.smv) || null,
+    start_date:            d(o.startDate   || cutStartDate),
+    end_date:              d(o.endDate     || completionDate),
+    ship_date:             d(shipDate),
+    status:                o.status || 'pending',
+    progress:              Number(o.progress) || 0,
+    component_line:        o.componentLine,
+    assembly_line:         o.assemblyLine,
+    requires_embroidery:   !!o.requiresEmbroidery,
+    color:                 o.color || '#3b82f6',
+    notes:                 o.notes || '',
+    season:                o.season || '',
+    // Legacy date columns (kept for backward compat, derived from portions)
+    material_arrival_date: d(matDate),
+    cut_start_date:        d(cutStartDate),
+    emb_start_date:        o.requiresEmbroidery ? d(embDate) : null,
+    sew_start_date:        d(sewStartDate),
+    completion_date:       d(completionDate),
   }
 }
 
 // ── Orders ────────────────────────────────────────────────────────────────────
 export async function fetchOrders() {
-  const { data, error } = await supabase.from('orders').select('*').order('ship_date')
+  const { data, error } = await supabase
+    .from('orders')
+    .select('*, order_portions(*)')
+    .order('order_no')
   if (error) throw error
   return data.map(toOrder)
 }
 
+export async function fetchPortionsByOrder(orderId) {
+  const { data, error } = await supabase
+    .from('order_portions')
+    .select('id, portion_name, portion_qty, sort_order, status, notes')
+    .eq('order_id', orderId)
+    .order('sort_order')
+  if (error) throw error
+  return (data || []).map(p => ({
+    id: p.id,
+    portionName: p.portion_name,
+    portionQty: p.portion_qty || 0,
+    sortOrder: p.sort_order || 1,
+    status: p.status || 'pending',
+    notes: p.notes || '',
+  }))
+}
+
+async function createPortionsForOrder(orderId, portions) {
+  const rows = portions.map((p, i) => fromPortion(p, orderId, i + 1))
+  const { data, error } = await supabase.from('order_portions').insert(rows).select()
+  if (error) throw error
+  return (data || []).map(toPortion)
+}
+
+async function syncPortions(orderId, portions, requiresEmbroidery) {
+  const { data: existing } = await supabase
+    .from('order_portions').select('id').eq('order_id', orderId)
+  const existingIds = new Set((existing || []).map(p => p.id))
+  const keepIds = new Set(portions.filter(p => p.id).map(p => p.id))
+
+  // Delete removed portions (cascade deletes their milestones)
+  const toDelete = [...existingIds].filter(id => !keepIds.has(id))
+  if (toDelete.length) {
+    await supabase.from('order_portions').delete().in('id', toDelete)
+  }
+
+  for (let i = 0; i < portions.length; i++) {
+    const p = portions[i]
+    const pData = fromPortion(p, orderId, i + 1)
+    if (p.id) {
+      await supabase.from('order_portions').update(pData).eq('id', p.id)
+    } else {
+      const { data } = await supabase.from('order_portions').insert(pData).select().single()
+      if (data) {
+        await createMilestonesForPortion(data.id, orderId, toPortion(data), requiresEmbroidery)
+      }
+    }
+  }
+}
+
 export async function createOrder(order) {
-  const { data, error } = await supabase.from('orders').insert(fromOrder(order)).select().single()
+  const dbRow = fromOrder(order)
+  const { data, error } = await supabase.from('orders').insert(dbRow).select().single()
   if (error) throw error
   const saved = toOrder(data)
-  await createMilestonesForOrder(saved.id, order)
-  return saved
+
+  // Use provided portions or create default "Full order" portion
+  const portions = (order.portions && order.portions.length > 0)
+    ? order.portions
+    : [{
+        portionName:          'Full order',
+        portionQty:           order.qty || 0,
+        materialArrivalDate:  order.materialArrivalDate,
+        cutStartDate:         order.cutStartDate,
+        embStartDate:         order.embStartDate,
+        sewStartDate:         order.sewStartDate,
+        completionDate:       order.completionDate,
+        exfactoryDate:        order.shipDate,
+        notes: '', status: 'pending',
+      }]
+
+  const createdPortions = await createPortionsForOrder(saved.id, portions)
+  for (const p of createdPortions) {
+    await createMilestonesForPortion(p.id, saved.id, p, order.requiresEmbroidery)
+  }
+
+  return { ...saved, portions: createdPortions }
 }
 
 export async function updateOrder(id, updates) {
-  const current = { ...updates }
-  const dbRow = fromOrder(current)
+  const dbRow = fromOrder(updates)
   const { data, error } = await supabase.from('orders').update(dbRow).eq('id', id).select().single()
   if (error) throw error
-  return toOrder(data)
+
+  if (updates.portions !== undefined) {
+    await syncPortions(id, updates.portions, updates.requiresEmbroidery)
+  }
+
+  const { data: fullData, error: e2 } = await supabase
+    .from('orders').select('*, order_portions(*)').eq('id', id).single()
+  if (e2) throw e2
+  return toOrder(fullData)
 }
 
 export async function deleteOrder(id) {
@@ -85,27 +249,26 @@ export async function deleteOrder(id) {
   if (error) throw error
 }
 
-// Auto-create milestones when order is saved
-async function createMilestonesForOrder(orderId, order) {
+// Create milestones for a portion
+async function createMilestonesForPortion(portionId, orderId, portion, requiresEmbroidery) {
   const milestones = [
-    { name: 'Material Arrival', date: order.materialArrivalDate, sort_order: 0 },
-    { name: 'Cut Start', date: order.cutStartDate, sort_order: 1 },
-    order.requiresEmbroidery ? { name: 'Embroidery Start', date: order.embStartDate, sort_order: 2 } : null,
-    { name: 'Sew Start', date: order.sewStartDate, sort_order: 3 },
-    { name: 'Completion', date: order.completionDate, sort_order: 4 },
-    { name: 'Ex-Factory', date: order.shipDate, sort_order: 5 },
+    { name: 'Material Arrival', date: portion.materialArrivalDate, sort_order: 0 },
+    { name: 'Cut Start',        date: portion.cutStartDate,        sort_order: 1 },
+    requiresEmbroidery ? { name: 'Embroidery Start', date: portion.embStartDate, sort_order: 2 } : null,
+    { name: 'Sew Start',        date: portion.sewStartDate,        sort_order: 3 },
+    { name: 'Completion',       date: portion.completionDate,      sort_order: 4 },
+    { name: 'Ex-Factory',       date: portion.exfactoryDate,       sort_order: 5 },
   ].filter(Boolean)
 
-  const rows = milestones
-    .filter(m => m.date)
-    .map(m => ({
-      order_id: orderId,
-      name: m.name,
-      milestone_date: d(m.date),
-      done: false,
-      status: 'pending',
-      sort_order: m.sort_order,
-    }))
+  const rows = milestones.filter(m => m.date).map(m => ({
+    order_id:       orderId,
+    portion_id:     portionId,
+    name:           m.name,
+    milestone_date: d(m.date),
+    done:           false,
+    status:         'pending',
+    sort_order:     m.sort_order,
+  }))
 
   if (rows.length) {
     const { error } = await supabase.from('shipment_milestones').insert(rows)
@@ -117,43 +280,56 @@ async function createMilestonesForOrder(orderId, order) {
 export async function fetchLineAllocations() {
   const { data, error } = await supabase
     .from('line_allocations')
-    .select(`*, orders(id, order_no, buyer, style, smv, color, requires_embroidery, qty)`)
+    .select(`
+      *,
+      orders(id, order_no, buyer, style, smv, color, requires_embroidery, qty),
+      order_portions(id, portion_name, portion_qty)
+    `)
     .order('start_date')
   if (error) throw error
   return data.map(row => ({
-    id: row.id,
-    orderId: row.order_id,
-    linePairNo: row.line_pair_no,
-    startDate: new Date(row.start_date),
-    endDate: new Date(row.end_date),
-    allocatedQty: row.allocated_qty,
+    id:             row.id,
+    orderId:        row.order_id,
+    portionId:      row.portion_id || null,
+    linePairNo:     row.line_pair_no,
+    startDate:      new Date(row.start_date),
+    endDate:        new Date(row.end_date),
+    allocatedQty:   row.allocated_qty,
     targetDailyPcs: row.target_daily_pcs,
-    notes: row.notes || '',
-    order: row.orders ? toOrder(row.orders) : null,
-    // convenience
-    orderNo: row.orders?.order_no || '',
-    color: row.orders?.color || '#3b82f6',
-    smv: row.orders?.smv || 0,
+    notes:          row.notes || '',
+    order:          row.orders ? toOrder({ ...row.orders, order_portions: [] }) : null,
+    orderNo:        row.orders?.order_no || '',
+    color:          row.orders?.color   || '#3b82f6',
+    smv:            row.orders?.smv     || 0,
+    portionName:    row.order_portions?.portion_name || null,
+    portionQty:     row.order_portions?.portion_qty  || null,
   }))
 }
 
 export async function createLineAllocation(alloc) {
   const { data, error } = await supabase.from('line_allocations').insert({
-    order_id: alloc.orderId,
-    line_pair_no: Number(alloc.linePairNo),
-    start_date: d(alloc.startDate),
-    end_date: d(alloc.endDate),
-    allocated_qty: Number(alloc.allocatedQty),
+    order_id:         alloc.orderId,
+    portion_id:       alloc.portionId || null,
+    line_pair_no:     Number(alloc.linePairNo),
+    start_date:       d(alloc.startDate),
+    end_date:         d(alloc.endDate),
+    allocated_qty:    Number(alloc.allocatedQty),
     target_daily_pcs: Number(alloc.targetDailyPcs),
-    notes: alloc.notes || '',
-  }).select(`*, orders(id, order_no, buyer, style, smv, color, qty)`).single()
+    notes:            alloc.notes || '',
+  })
+  .select(`*, orders(id, order_no, buyer, style, smv, color, qty), order_portions(id, portion_name, portion_qty)`)
+  .single()
   if (error) throw error
   return {
-    id: data.id, orderId: data.order_id, linePairNo: data.line_pair_no,
+    id: data.id, orderId: data.order_id, portionId: data.portion_id || null,
+    linePairNo: data.line_pair_no,
     startDate: new Date(data.start_date), endDate: new Date(data.end_date),
     allocatedQty: data.allocated_qty, targetDailyPcs: data.target_daily_pcs,
-    notes: data.notes, order: data.orders ? toOrder(data.orders) : null,
+    notes: data.notes,
+    order: data.orders ? toOrder({ ...data.orders, order_portions: [] }) : null,
     orderNo: data.orders?.order_no || '', color: data.orders?.color || '#3b82f6',
+    portionName: data.order_portions?.portion_name || null,
+    portionQty:  data.order_portions?.portion_qty  || null,
   }
 }
 
@@ -164,24 +340,27 @@ export async function deleteLineAllocation(id) {
 
 export async function updateLineAllocation(id, updates) {
   const payload = {}
-  if (updates.startDate    !== undefined) payload.start_date       = d(updates.startDate)
-  if (updates.endDate      !== undefined) payload.end_date         = d(updates.endDate)
-  if (updates.allocatedQty !== undefined) payload.allocated_qty    = Number(updates.allocatedQty)
-  if (updates.targetDailyPcs !== undefined) payload.target_daily_pcs = Number(updates.targetDailyPcs)
-  if (updates.notes        !== undefined) payload.notes            = updates.notes
+  if (updates.startDate      !== undefined) payload.start_date        = d(updates.startDate)
+  if (updates.endDate        !== undefined) payload.end_date          = d(updates.endDate)
+  if (updates.allocatedQty   !== undefined) payload.allocated_qty     = Number(updates.allocatedQty)
+  if (updates.targetDailyPcs !== undefined) payload.target_daily_pcs  = Number(updates.targetDailyPcs)
+  if (updates.notes          !== undefined) payload.notes             = updates.notes
+  if (updates.portionId      !== undefined) payload.portion_id        = updates.portionId || null
   const { data, error } = await supabase
-    .from('line_allocations')
-    .update(payload)
-    .eq('id', id)
-    .select(`*, orders(id, order_no, buyer, style, smv, color, qty)`)
+    .from('line_allocations').update(payload).eq('id', id)
+    .select(`*, orders(id, order_no, buyer, style, smv, color, qty), order_portions(id, portion_name, portion_qty)`)
     .single()
   if (error) throw error
   return {
-    id: data.id, orderId: data.order_id, linePairNo: data.line_pair_no,
+    id: data.id, orderId: data.order_id, portionId: data.portion_id || null,
+    linePairNo: data.line_pair_no,
     startDate: new Date(data.start_date), endDate: new Date(data.end_date),
     allocatedQty: data.allocated_qty, targetDailyPcs: data.target_daily_pcs,
-    notes: data.notes || '', order: data.orders ? toOrder(data.orders) : null,
+    notes: data.notes || '',
+    order: data.orders ? toOrder({ ...data.orders, order_portions: [] }) : null,
     orderNo: data.orders?.order_no || '', color: data.orders?.color || '#3b82f6',
+    portionName: data.order_portions?.portion_name || null,
+    portionQty:  data.order_portions?.portion_qty  || null,
   }
 }
 
@@ -237,35 +416,99 @@ export async function deleteSectionOutputEntry(id) {
 export async function fetchShipments() {
   const { data, error } = await supabase
     .from('orders')
-    .select(`*, shipment_milestones(id, name, milestone_date, actual_date, done, status, qty_shipped, remarks, sort_order)`)
+    .select(`
+      *,
+      order_portions(
+        id, portion_name, portion_qty, sort_order, status, notes,
+        date_material_arrival, date_cut_start, date_emb_start,
+        date_sew_start, date_completion, date_exfactory
+      ),
+      shipment_milestones(
+        id, name, milestone_date, actual_date, done, status,
+        qty_shipped, remarks, sort_order, portion_id
+      )
+    `)
     .order('ship_date')
   if (error) throw error
-  return data.map(row => ({
-    ...toOrder(row),
-    totalQty: row.qty,
-    shippedQty: (row.shipment_milestones || []).find(m => m.name === 'Ex-Factory')?.qty_shipped || 0,
-    milestones: (row.shipment_milestones || [])
-      .sort((a, b) => a.sort_order - b.sort_order)
-      .map(m => ({
-        id: m.id,
-        name: m.name,
-        date: m.milestone_date ? new Date(m.milestone_date) : null,
-        actualDate: m.actual_date ? new Date(m.actual_date) : null,
-        done: m.done,
-        status: m.status || 'pending',
-        qtyShipped: m.qty_shipped || 0,
-        remarks: m.remarks || '',
-      })),
-  }))
+
+  return data.map(row => {
+    const portions = [...(row.order_portions || [])]
+      .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+    const allMilestones = row.shipment_milestones || []
+
+    const mapMs = m => ({
+      id: m.id,
+      name: m.name,
+      date: m.milestone_date ? new Date(m.milestone_date) : null,
+      actualDate: m.actual_date ? new Date(m.actual_date) : null,
+      done: m.done,
+      status: m.status || 'pending',
+      qtyShipped: m.qty_shipped || 0,
+      remarks: m.remarks || '',
+    })
+
+    const portionsWithMs = portions.map(p => ({
+      ...toPortion(p),
+      milestones: allMilestones
+        .filter(m => m.portion_id === p.id)
+        .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+        .map(mapMs),
+    }))
+
+    // Legacy milestones (no portion_id) → attach to first portion
+    const legacyMs = allMilestones
+      .filter(m => !m.portion_id)
+      .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+      .map(mapMs)
+
+    if (legacyMs.length > 0 && portionsWithMs.length > 0) {
+      portionsWithMs[0].milestones = [...legacyMs, ...portionsWithMs[0].milestones]
+    }
+
+    // Pre-migration fallback: no portions at all
+    if (portionsWithMs.length === 0 && legacyMs.length > 0) {
+      portionsWithMs.push({
+        id: null,
+        orderId: row.id,
+        portionName: 'Full order',
+        portionQty: row.qty,
+        sortOrder: 1,
+        status: 'pending',
+        notes: '',
+        materialArrivalDate: row.material_arrival_date ? new Date(row.material_arrival_date) : null,
+        cutStartDate: row.cut_start_date ? new Date(row.cut_start_date) : null,
+        embStartDate: row.emb_start_date ? new Date(row.emb_start_date) : null,
+        sewStartDate: row.sew_start_date ? new Date(row.sew_start_date) : null,
+        completionDate: row.completion_date ? new Date(row.completion_date) : null,
+        exfactoryDate: row.ship_date ? new Date(row.ship_date) : null,
+        milestones: legacyMs,
+      })
+    }
+
+    const shippedQty = portionsWithMs.reduce((sum, p) => {
+      const ef = p.milestones.find(m => m.name === 'Ex-Factory')
+      return sum + (ef?.qtyShipped || 0)
+    }, 0)
+
+    const order = toOrder(row)
+
+    return {
+      ...order,
+      portions: portionsWithMs,
+      totalQty: row.qty,
+      shippedQty,
+      milestones: portionsWithMs.flatMap(p => p.milestones), // backward compat flat list
+    }
+  })
 }
 
 export async function updateMilestoneRecord(id, updates) {
   const payload = {}
-  if (updates.actualDate !== undefined) payload.actual_date = d(updates.actualDate)
-  if (updates.done !== undefined) payload.done = updates.done
-  if (updates.status !== undefined) payload.status = updates.status
-  if (updates.qtyShipped !== undefined) payload.qty_shipped = Number(updates.qtyShipped)
-  if (updates.remarks !== undefined) payload.remarks = updates.remarks
+  if (updates.actualDate  !== undefined) payload.actual_date  = d(updates.actualDate)
+  if (updates.done        !== undefined) payload.done         = updates.done
+  if (updates.status      !== undefined) payload.status       = updates.status
+  if (updates.qtyShipped  !== undefined) payload.qty_shipped  = Number(updates.qtyShipped)
+  if (updates.remarks     !== undefined) payload.remarks      = updates.remarks
   const { error } = await supabase.from('shipment_milestones').update(payload).eq('id', id)
   if (error) throw error
 }
@@ -422,7 +665,6 @@ export async function fetchDailyLineOutputByDate(dateStr) {
     .select('*, orders(id, order_no, buyer, style, smv, qty, completion_date)')
     .eq('date', dateStr)
   if (error) throw error
-  // Only return rows that have a line_name (new format)
   return data
     .filter(row => row.line_name)
     .map(row => ({
@@ -479,7 +721,6 @@ export async function fetchLineCumulativeByOrder() {
 }
 
 // ── Clear All Data ─────────────────────────────────────────────────────────────
-// Deletes every row from every application table. Order matters: children first.
 export async function clearAllData() {
   const tables = [
     'visit_itinerary',
@@ -490,16 +731,17 @@ export async function clearAllData() {
     'daily_line_output',
     'shipment_milestones',
     'line_allocations',
+    'order_portions',
     'orders',
   ]
   for (const table of tables) {
-    // .not('id','is',null) matches every row regardless of whether id is uuid or integer
     const { error } = await supabase.from(table).delete().not('id', 'is', null)
     if (error) throw new Error(`Failed to clear ${table}: ${error.message}`)
   }
 }
 
-// Upsert section output (insert, fallback to update on 23505 duplicate)
+// ── Upsert helpers ─────────────────────────────────────────────────────────────
+
 export async function upsertSectionOutputEntry(entry) {
   const efficiency = entry.target > 0 ? Math.round((entry.actual / entry.target) * 100) : 0
   const payload = {
@@ -525,7 +767,6 @@ export async function upsertSectionOutputEntry(entry) {
   }
 }
 
-// Upsert section headcount (section_headcount is a new table with UNIQUE constraint)
 export async function upsertSectionHeadcountEntry(entry) {
   const { error } = await supabase.from('section_headcount').upsert({
     output_date: entry.date,
@@ -537,7 +778,6 @@ export async function upsertSectionHeadcountEntry(entry) {
   if (error) throw error
 }
 
-// Upsert daily line output with line_name (insert, fallback to update on 23505)
 export async function upsertLineOutputEntry(entry) {
   const linePairNo = entry.lineName ? parseInt(entry.lineName.split('-')[1]) : null
   const payload = {

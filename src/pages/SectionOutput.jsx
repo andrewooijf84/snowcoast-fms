@@ -336,6 +336,13 @@ function CascadeTable({ sectionFilter, soBySection, hcBySection, lineDataByLine,
                 <tr key={row.id || `${lineName}-${ri}`} className={`border-b border-slate-100 ${isAssy ? 'bg-green-50/30' : 'bg-purple-50/30'}`}>
                   <td className={tdCls + ' pl-12'}>
                     <span className="text-xs font-semibold text-slate-600">{row.orderNo || '—'}</span>
+                    {isAssy && row.orderId && (() => {
+                      const pairNo = parseInt(lineName.split('-')[1])
+                      const alloc = lineAllocations.find(a => a.orderId === row.orderId && a.linePairNo === pairNo)
+                      return alloc?.portionName ? (
+                        <span className="text-xs text-blue-600 ml-1 font-medium">— {alloc.portionName}</span>
+                      ) : null
+                    })()}
                     {row.style && <span className="text-xs text-slate-400 ml-1.5">{row.style}</span>}
                   </td>
                   <td className={tdCls + ' text-xs text-slate-500'}>{row.targetPcs.toLocaleString()}</td>

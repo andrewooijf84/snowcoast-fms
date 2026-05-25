@@ -138,7 +138,7 @@ export default function LineMap() {
                             return (
                               <div key={a.id} className="gantt-bar absolute top-0.5 rounded flex items-center px-1.5 overflow-hidden"
                                 style={{ left: b.left, width: b.width - 2, height: 24, background: a.color }}
-                                title={`${a.orderNo} · ${a.allocatedQty.toLocaleString()} pcs · ${wd} working days · ${avg ? avg.toLocaleString() + ' pcs/day' : a.targetDailyPcs + '/day target'}`}>
+                                title={`${a.orderNo}${a.portionName ? ' — ' + a.portionName : ''} · ${a.portionName ? 'Portion: ' + (a.portionQty || '').toLocaleString() + ' pcs · ' : ''}Alloc: ${a.allocatedQty.toLocaleString()} pcs · ${wd} working days · ${avg ? avg.toLocaleString() + ' pcs/day' : a.targetDailyPcs + '/day target'}`}>
                                 <span className="text-white text-xs font-medium truncate">
                                   {a.orderNo}{avg ? ` · ${avg.toLocaleString()} pcs/d` : ''}
                                 </span>
@@ -210,7 +210,7 @@ export default function LineMap() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-slate-200">
-                    {['Order','Line','Start','End','Alloc Qty','Working Days','Avg Output/Day (Planned)'].map(h => (
+                    {['Order','Portion','Line','Start','End','Alloc Qty','Working Days','Avg Output/Day (Planned)'].map(h => (
                       <th key={h} className="text-left py-2 px-3 text-xs font-semibold text-slate-500 uppercase whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -226,6 +226,11 @@ export default function LineMap() {
                             <span className="w-2 h-2 rounded-full" style={{ background: a.color }} />
                             <span className="font-semibold">{a.orderNo}</span>
                           </div>
+                        </td>
+                        <td className="py-2 px-3">
+                          {a.portionName
+                            ? <span className="text-xs bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-medium">{a.portionName}</span>
+                            : <span className="text-xs text-slate-300">—</span>}
                         </td>
                         <td className="py-2 px-3">Line {String(a.linePairNo).padStart(2,'0')}</td>
                         <td className="py-2 px-3 text-slate-600 whitespace-nowrap">{format(new Date(a.startDate),'MMM dd')}</td>

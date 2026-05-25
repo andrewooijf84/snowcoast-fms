@@ -4,7 +4,7 @@ import {
   format, differenceInDays, startOfMonth, endOfMonth,
   eachDayOfInterval, isWeekend,
 } from 'date-fns'
-import { Plus, BarChart2, Table2, ChevronLeft, ChevronRight, Pencil, Trash2, AlertTriangle, FileUp } from 'lucide-react'
+import { Plus, BarChart2, Table2, ChevronLeft, ChevronRight, Pencil, Trash2, AlertTriangle, FileUp, ChevronDown } from 'lucide-react'
 import { useAppStore } from '@/store/useStore'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -26,12 +26,16 @@ const STATUS_CFG = {
 const COLORS = ['#3b82f6','#8b5cf6','#f59e0b','#22c55e','#ef4444','#ec4899','#06b6d4','#84cc16','#f97316','#6366f1']
 
 function isIncomplete(o) {
-  return !o.smv || !o.materialArrivalDate
+  // Incomplete if no portions have a sew start date
+  const hasSewStart = (o.portions || []).some(p => p.sewStartDate)
+  return !o.smv || (!hasSewStart && !o.sewStartDate)
 }
 
 function ShipmentGapIcon({ order }) {
-  if (!order.completionDate || !order.shipDate) return null
-  const gap = shipmentGapWorkingDays(order.completionDate, order.shipDate)
+  const completionDate = order.completionDate
+  const shipDate = order.shipDate || order.latestExfactory
+  if (!completionDate || !shipDate) return null
+  const gap = shipmentGapWorkingDays(completionDate, shipDate)
   if (gap === null) return null
   if (gap < 0) {
     return (
@@ -50,6 +54,16 @@ function ShipmentGapIcon({ order }) {
   return null
 }
 
+// Milestone dot colours
+const MILESTONE_COLORS = {
+  'Material Arrival': '#94a3b8',
+  'Cut Start':        '#3b82f6',
+  'Emb Start':        '#ec4899',
+  'Sew Start':        '#22c55e',
+  'Completion':       '#f59e0b',
+  'Ex-Factory':       '#ef4444',
+}
+
 // ── Gantt chart ────────────────────────────────────────────────────────────────
 function GanttChart({ orders, onEdit, canEdit, orderProgress }) {
   const [viewDate, setViewDate] = useState(new Date())
@@ -59,9 +73,10 @@ function GanttChart({ orders, onEdit, canEdit, orderProgress }) {
   const DW = 28
   const todayStr = format(new Date(), 'yyyy-MM-dd')
 
+  // Bar spans from earliest sew start to latest ex-factory across all portions
   const bar = (order) => {
-    const s = new Date(order.startDate || order.cutStartDate || order.materialArrivalDate)
-    const e = new Date(order.endDate || order.completionDate)
+    const s = new Date(order.earliestSewStart || order.startDate || order.cutStartDate || order.materialArrivalDate)
+    const e = new Date(order.latestExfactory  || order.endDate   || order.completionDate)
     if (!s || !e || isNaN(s) || isNaN(e)) return null
     const cs = s < monthStart ? monthStart : s
     const ce = e > monthEnd   ? monthEnd   : e
@@ -70,6 +85,41 @@ function GanttChart({ orders, onEdit, canEdit, orderProgress }) {
       left:  differenceInDays(cs, monthStart) * DW,
       width: Math.max((differenceInDays(ce, cs) + 1) * DW, DW),
     }
+  }
+
+  // Milestone markers for all portions
+  const getMilestoneMarkers = (order) => {
+    const markers = []
+    const portions = order.portions && order.portions.length > 0
+      ? order.portions
+      : [{
+          sewStartDate: order.sewStartDate, exfactoryDate: order.shipDate,
+          materialArrivalDate: order.materialArrivalDate, cutStartDate: order.cutStartDate,
+          completionDate: order.completionDate, embStartDate: order.embStartDate,
+          portionName: 'Full order',
+        }]
+
+    const milestoneFields = [
+      { key: 'materialArrivalDate', label: 'Mat',  color: MILESTONE_COLORS['Material Arrival'] },
+      { key: 'cutStartDate',        label: 'Cut',  color: MILESTONE_COLORS['Cut Start'] },
+      { key: 'embStartDate',        label: 'Emb',  color: MILESTONE_COLORS['Emb Start'] },
+      { key: 'sewStartDate',        label: 'Sew',  color: MILESTONE_COLORS['Sew Start'] },
+      { key: 'completionDate',      label: 'Done', color: MILESTONE_COLORS['Completion'] },
+      { key: 'exfactoryDate',       label: 'Ship', color: MILESTONE_COLORS['Ex-Factory'] },
+    ]
+
+    portions.forEach((portion, pi) => {
+      milestoneFields.forEach(({ key, label, color }) => {
+        const val = portion[key]
+        if (!val) return
+        const dt = new Date(val)
+        if (dt < monthStart || dt > monthEnd) return
+        const left = differenceInDays(dt, monthStart) * DW + DW / 2 - 4
+        const portionLabel = portions.length > 1 ? `${portion.portionName || `P${pi+1}`}: ${label}` : label
+        markers.push({ left, color, label: portionLabel, date: format(dt, 'MMM d'), portionIdx: pi })
+      })
+    })
+    return markers
   }
 
   return (
@@ -96,11 +146,16 @@ function GanttChart({ orders, onEdit, canEdit, orderProgress }) {
             ))}
           </div>
         </div>
+
         {orders.length === 0 && (
           <div className="text-center py-12 text-slate-400 text-sm">No orders yet — click "New Order" to add one</div>
         )}
+
         {orders.map(order => {
           const b = bar(order)
+          const markers = getMilestoneMarkers(order)
+          const portionsCount = (order.portions || []).length
+
           return (
             <div key={order.id} className="flex items-center border-t border-slate-100 hover:bg-slate-50 group">
               <div className="w-64 flex-shrink-0 py-2 pr-3">
@@ -112,6 +167,9 @@ function GanttChart({ orders, onEdit, canEdit, orderProgress }) {
                       <ShipmentGapIcon order={order} />
                       {isIncomplete(order) && (
                         <span className="text-xs bg-amber-100 text-amber-700 px-1 rounded">Incomplete</span>
+                      )}
+                      {portionsCount > 1 && (
+                        <span className="text-xs bg-blue-50 text-blue-600 px-1 rounded">{portionsCount}P</span>
                       )}
                     </div>
                     <p className="text-xs text-slate-400">{order.buyer}{order.season ? ` · ${order.season}` : ''}</p>
@@ -135,7 +193,6 @@ function GanttChart({ orders, onEdit, canEdit, orderProgress }) {
                   return (
                     <div className="gantt-bar absolute top-1 rounded-md overflow-hidden flex items-center"
                       style={{ left: b.left, width: b.width - 2, height: 24, background: order.color + '55' }}>
-                      {/* Progress fill */}
                       <div className="absolute top-0 left-0 h-full rounded-md"
                         style={{ width: `${pct}%`, background: order.color }} />
                       <span className="relative text-white text-xs font-bold px-2 truncate drop-shadow">
@@ -145,8 +202,17 @@ function GanttChart({ orders, onEdit, canEdit, orderProgress }) {
                     </div>
                   )
                 })()}
+                {/* Milestone markers */}
+                {markers.map((m, i) => (
+                  <div key={i} className="absolute" style={{ left: m.left, top: 2, zIndex: 10 }}
+                    title={`${m.label}: ${m.date}`}>
+                    <div className="w-2 h-2 rounded-full border border-white shadow-sm"
+                      style={{ background: m.color }} />
+                  </div>
+                ))}
+                {/* Ship date line */}
                 {(() => {
-                  const ship = order.shipDate ? new Date(order.shipDate) : null
+                  const ship = order.latestExfactory || order.shipDate ? new Date(order.latestExfactory || order.shipDate) : null
                   if (ship && ship >= monthStart && ship <= monthEnd) {
                     return <div className="absolute top-0 bottom-0 w-0.5 bg-red-400 opacity-60"
                       style={{ left: differenceInDays(ship, monthStart) * DW + DW / 2 }}
@@ -162,12 +228,11 @@ function GanttChart({ orders, onEdit, canEdit, orderProgress }) {
   )
 }
 
-// ── Progress cell (auto-calculated from daily output) ─────────────────────────
+// ── Progress cell ─────────────────────────────────────────────────────────────
 function OrderProgressCell({ order, orderProgress }) {
   const cumActual = orderProgress[order.id] || 0
   const qty = order.qty || 0
 
-  // If we have real output data, show it; otherwise fall back to manual progress
   if (cumActual > 0 && qty > 0) {
     const pct = Math.min(100, Math.round(cumActual / qty * 100))
     const color = pct >= 75 ? '#22c55e' : pct >= 40 ? '#f59e0b' : '#ef4444'
@@ -187,7 +252,6 @@ function OrderProgressCell({ order, orderProgress }) {
     )
   }
 
-  // No output data — show manual progress with muted style
   const pct = order.progress || 0
   return (
     <div className="space-y-1 min-w-[90px]">
@@ -202,6 +266,11 @@ function OrderProgressCell({ order, orderProgress }) {
 
 // ── Table view ─────────────────────────────────────────────────────────────────
 function OrderTable({ orders, onEdit, onDelete, canEdit, orderProgress }) {
+  const [expanded, setExpanded] = useState(new Set())
+  const toggle = (id) => setExpanded(prev => {
+    const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s
+  })
+
   return (
     <div className="overflow-auto">
       {orders.length === 0 && (
@@ -211,7 +280,7 @@ function OrderTable({ orders, onEdit, onDelete, canEdit, orderProgress }) {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-slate-200">
-              {['Order No', 'Customer', 'Style', 'Season', 'Qty', 'SMV', 'Completion', 'Ex-Factory', 'Lines', 'Output Progress', 'Status', ''].map(h => (
+              {['Order No', 'Customer', 'Style', 'Season', 'Total Qty', 'Portions', 'SMV', 'Emb?', 'Output Progress', 'Status', ''].map(h => (
                 <th key={h} className="text-left py-2 px-3 text-xs font-semibold text-slate-500 uppercase whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -219,11 +288,13 @@ function OrderTable({ orders, onEdit, onDelete, canEdit, orderProgress }) {
           <tbody>
             {orders.map(o => {
               const cfg = STATUS_CFG[o.status] || STATUS_CFG.pending
-              const gap = (o.completionDate && o.shipDate)
-                ? shipmentGapWorkingDays(o.completionDate, o.shipDate)
-                : null
-              return (
-                <tr key={o.id} className="border-b border-slate-100 hover:bg-slate-50">
+              const isOpen = expanded.has(o.id)
+              const portions = o.portions || []
+
+              return [
+                // Main order row
+                <tr key={o.id} className="border-b border-slate-100 hover:bg-slate-50 cursor-pointer"
+                  onClick={() => portions.length > 0 && toggle(o.id)}>
                   <td className="py-2.5 px-3">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: o.color }} />
@@ -236,36 +307,27 @@ function OrderTable({ orders, onEdit, onDelete, canEdit, orderProgress }) {
                   <td className="py-2.5 px-3 text-slate-600">{o.style}</td>
                   <td className="py-2.5 px-3 text-slate-500 text-xs">{o.season}</td>
                   <td className="py-2.5 px-3 font-medium">{o.qty?.toLocaleString()}</td>
-                  <td className="py-2.5 px-3">{o.smv || <span className="text-amber-500">—</span>}</td>
-                  <td className="py-2.5 px-3 text-slate-500 whitespace-nowrap">
-                    {o.completionDate ? format(new Date(o.completionDate), 'MMM dd') : '—'}
-                  </td>
-                  <td className="py-2.5 px-3 whitespace-nowrap">
+                  <td className="py-2.5 px-3">
                     <div className="flex items-center gap-1">
-                      {gap !== null && gap < 0 && (
-                        <span title={`Critical: completion exceeds ship date by ${Math.abs(gap)} working day(s)`}>
-                          <AlertTriangle className="w-3.5 h-3.5 text-red-500" />
-                        </span>
-                      )}
-                      {gap !== null && gap >= 0 && gap <= 5 && (
-                        <span title={`Warning: only ${gap} working day(s) between completion and ship`}>
-                          <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
-                        </span>
-                      )}
-                      <span className={gap !== null && gap <= 5 && o.status !== 'completed' ? 'text-red-600 font-medium' : 'text-slate-700'}>
-                        {o.shipDate ? format(new Date(o.shipDate), 'MMM dd') : '—'}
+                      <span className="text-xs bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-medium">
+                        {portions.length} {portions.length === 1 ? 'portion' : 'portions'}
                       </span>
+                      {portions.length > 0 && (
+                        isOpen
+                          ? <ChevronDown className="w-3 h-3 text-slate-400" />
+                          : <ChevronLeft className="w-3 h-3 text-slate-400 rotate-180" />
+                      )}
                     </div>
                   </td>
-                  <td className="py-2.5 px-3 text-xs">
-                    <span className="bg-slate-100 px-1 rounded">{o.componentLine}</span>
-                    {' '}<span className="bg-blue-50 text-blue-700 px-1 rounded">{o.assemblyLine}</span>
-                  </td>
+                  <td className="py-2.5 px-3">{o.smv || <span className="text-amber-500">—</span>}</td>
                   <td className="py-2.5 px-3">
+                    {o.requiresEmbroidery ? <span className="text-xs text-pink-600">Yes</span> : <span className="text-xs text-slate-300">No</span>}
+                  </td>
+                  <td className="py-2.5 px-3" onClick={e => e.stopPropagation()}>
                     <OrderProgressCell order={o} orderProgress={orderProgress} />
                   </td>
                   <td className="py-2.5 px-3"><Badge variant={cfg.variant}>{cfg.label}</Badge></td>
-                  <td className="py-2.5 px-3">
+                  <td className="py-2.5 px-3" onClick={e => e.stopPropagation()}>
                     <div className="flex gap-1">
                       {canEdit && (
                         <button onClick={() => onEdit(o)} className="p-1.5 rounded hover:bg-slate-100 text-slate-400 hover:text-blue-600">
@@ -279,8 +341,50 @@ function OrderTable({ orders, onEdit, onDelete, canEdit, orderProgress }) {
                       )}
                     </div>
                   </td>
-                </tr>
-              )
+                </tr>,
+                // Portion sub-rows
+                ...(isOpen ? portions.map((portion, pi) => (
+                  <tr key={`${o.id}-portion-${pi}`} className="border-b border-blue-50 bg-blue-50/40">
+                    <td className="py-1.5 px-3 pl-9">
+                      <span className="text-xs text-blue-700 font-semibold">{portion.portionName}</span>
+                    </td>
+                    <td className="py-1.5 px-3">
+                      <span className="text-xs font-medium text-slate-700">{portion.portionQty.toLocaleString()} pcs</span>
+                      <span className="text-xs text-slate-400 ml-1">
+                        ({o.qty > 0 ? Math.round(portion.portionQty / o.qty * 100) : 0}%)
+                      </span>
+                    </td>
+                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
+                      {portion.materialArrivalDate ? format(new Date(portion.materialArrivalDate), 'MMM dd') : '—'}
+                    </td>
+                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
+                      {portion.cutStartDate ? format(new Date(portion.cutStartDate), 'MMM dd') : '—'}
+                    </td>
+                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
+                      {portion.sewStartDate ? format(new Date(portion.sewStartDate), 'MMM dd') : '—'}
+                    </td>
+                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
+                      {o.requiresEmbroidery ? (portion.embStartDate ? format(new Date(portion.embStartDate), 'MMM dd') : '—') : <span className="text-slate-200">—</span>}
+                    </td>
+                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
+                      {portion.completionDate ? format(new Date(portion.completionDate), 'MMM dd') : '—'}
+                    </td>
+                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
+                      {portion.exfactoryDate ? (
+                        <span className="font-medium text-red-600">{format(new Date(portion.exfactoryDate), 'MMM dd')}</span>
+                      ) : '—'}
+                    </td>
+                    <td className="py-1.5 px-3 text-xs text-slate-400" colSpan={3}>
+                      <Badge variant={
+                        portion.status === 'completed' ? 'success'
+                        : portion.status === 'in-production' ? 'info'
+                        : 'secondary'
+                      } className="text-xs">{portion.status}</Badge>
+                      {portion.notes && <span className="ml-2 italic">{portion.notes}</span>}
+                    </td>
+                  </tr>
+                )) : []),
+              ]
             })}
           </tbody>
         </table>
@@ -301,7 +405,6 @@ export default function MasterPlan() {
 
   const editable = canEdit()
 
-  // Load cumulative output per order (auto-progress)
   useEffect(() => {
     fetchOrderProgressAll().then(setOrderProgress).catch(() => {})
   }, [])

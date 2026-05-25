@@ -15,6 +15,7 @@ import { FormModal, TextField, SelectField, TextareaField } from '@/components/u
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { LINES } from '@/data/mockData'
 import { countWorkingDays, addWorkingDays } from '@/lib/workingDays'
+import { fetchPortionsByOrder } from '@/lib/api'
 
 const OPERATORS = 25
 const HOURS = 8
@@ -31,10 +32,15 @@ const fmt = (d) => d ? (d instanceof Date ? d.toISOString().split('T')[0] : Stri
 
 // ── Allocation Form ────────────────────────────────────────────────────────────
 function AllocationForm({ open, onClose, orders, onSave, initial }) {
-  const BLANK = { orderId: '', linePairNo: '1', startDate: '', endDate: '', allocatedQty: '', targetDailyPcs: '', notes: '' }
+  const BLANK = {
+    orderId: '', portionId: '', linePairNo: '1',
+    startDate: '', endDate: '', allocatedQty: '',
+    targetDailyPcs: '', notes: '',
+  }
   const [f, setF] = useState(() => initial
-    ? { ...initial, linePairNo: String(initial.linePairNo), startDate: fmt(initial.startDate), endDate: fmt(initial.endDate) }
+    ? { ...initial, portionId: initial.portionId || '', linePairNo: String(initial.linePairNo), startDate: fmt(initial.startDate), endDate: fmt(initial.endDate) }
     : BLANK)
+  const [portions, setPortions] = useState([])
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState('')
   const set = (k, v) => setF(p => ({ ...p, [k]: v }))
@@ -42,13 +48,36 @@ function AllocationForm({ open, onClose, orders, onSave, initial }) {
   useEffect(() => {
     if (open) {
       setF(initial
-        ? { ...initial, linePairNo: String(initial.linePairNo), startDate: fmt(initial.startDate), endDate: fmt(initial.endDate) }
+        ? { ...initial, portionId: initial.portionId || '', linePairNo: String(initial.linePairNo), startDate: fmt(initial.startDate), endDate: fmt(initial.endDate) }
         : BLANK)
       setErr('')
     }
   }, [open])
 
+  // Load portions when order changes
+  useEffect(() => {
+    if (f.orderId) {
+      fetchPortionsByOrder(f.orderId)
+        .then(setPortions)
+        .catch(() => setPortions([]))
+    } else {
+      setPortions([])
+      set('portionId', '')
+    }
+  }, [f.orderId])
+
+  // Auto-fill allocatedQty from selected portion (only on new allocation)
+  useEffect(() => {
+    if (!initial && f.portionId && portions.length > 0) {
+      const portion = portions.find(p => p.id === f.portionId)
+      if (portion && !f.allocatedQty) {
+        set('allocatedQty', String(portion.portionQty))
+      }
+    }
+  }, [f.portionId, portions])
+
   const orderOpts = orders.map(o => ({ value: o.id, label: `${o.orderNo} — ${o.buyer}` }))
+  const portionOpts = portions.map(p => ({ value: p.id, label: `${p.portionName} (${p.portionQty.toLocaleString()} pcs)` }))
   const lineOpts  = LINES.map(l => ({ value: String(l.pairNo), label: `Line ${String(l.pairNo).padStart(2,'0')} (${l.componentLine}/${l.assemblyLine})` }))
 
   const workingDays = (f.startDate && f.endDate)
@@ -64,7 +93,13 @@ function AllocationForm({ open, onClose, orders, onSave, initial }) {
     }
     setSaving(true); setErr('')
     try {
-      await onSave({ ...f, linePairNo: Number(f.linePairNo), startDate: new Date(f.startDate), endDate: new Date(f.endDate) })
+      await onSave({
+        ...f,
+        portionId: f.portionId || null,
+        linePairNo: Number(f.linePairNo),
+        startDate: new Date(f.startDate),
+        endDate: new Date(f.endDate),
+      })
       onClose()
     } catch (e) { setErr(e.message) }
     finally { setSaving(false) }
@@ -73,8 +108,13 @@ function AllocationForm({ open, onClose, orders, onSave, initial }) {
   return (
     <FormModal open={open} onClose={onClose} title={initial ? 'Edit Allocation' : 'New Line Allocation'}
       onSave={handleSave} saving={saving} error={err}>
-      <SelectField label="Order *" value={f.orderId} onChange={v => set('orderId', v)}
+      <SelectField label="Order *" value={f.orderId} onChange={v => { set('orderId', v); set('portionId', '') }}
         options={orderOpts} placeholder="Select order…" span={2} />
+      {portions.length > 0 && (
+        <SelectField label="Portion" value={f.portionId} onChange={v => set('portionId', v)}
+          options={portionOpts} placeholder="All portions (no specific portion)"
+          span={2} />
+      )}
       <SelectField label="Line Pair *" value={f.linePairNo} onChange={v => set('linePairNo', v)} options={lineOpts} />
       <TextField label="Allocated Qty" value={f.allocatedQty} onChange={v => set('allocatedQty', v)} type="number" min="0" />
       <TextField label="Start Date *" value={f.startDate} onChange={v => set('startDate', v)} type="date" />
@@ -96,7 +136,6 @@ function PlanningTools() {
   const ic = 'flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
   const today = new Date().toISOString().split('T')[0]
 
-  // SMV Calculator
   const [smvInp, setSmvInp] = useState({ headcount: 25, hours: 8, smv: 35.5, targetPcs: 5000 })
   const smvRes = useMemo(() => {
     const capMin  = smvInp.headcount * smvInp.hours * 60
@@ -105,7 +144,6 @@ function PlanningTools() {
     return { capMin: Math.round(capMin), loadMin: Math.round(loadMin), pct }
   }, [smvInp])
 
-  // Output & Finish Date Calculator
   const [outInp, setOutInp] = useState({ targetDailyPcs: 500, orderQty: 5000, startDate: today })
   const outRes = useMemo(() => {
     const pcs = Number(outInp.targetDailyPcs)
@@ -130,14 +168,13 @@ function PlanningTools() {
             <TabsTrigger value="output" className="flex-1 text-xs">Output & Finish Date</TabsTrigger>
           </TabsList>
 
-          {/* ── Tab 1: SMV Calculator ── */}
           <TabsContent value="smv" className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
               {[
-                ['headcount', 'Headcount',   '1'],
-                ['hours',     'Hours/Day',   '0.5'],
-                ['smv',       'SMV',         '0.1'],
-                ['targetPcs', 'Target Pcs',  '1'],
+                ['headcount', 'Headcount',  '1'],
+                ['hours',     'Hours/Day',  '0.5'],
+                ['smv',       'SMV',        '0.1'],
+                ['targetPcs', 'Target Pcs', '1'],
               ].map(([k, label, step]) => (
                 <div key={k}>
                   <p className="text-xs font-medium text-slate-600 mb-1">{label}</p>
@@ -164,7 +201,6 @@ function PlanningTools() {
             </div>
           </TabsContent>
 
-          {/* ── Tab 2: Output & Finish Date ── */}
           <TabsContent value="output" className="space-y-3">
             <div className="space-y-3">
               {[
@@ -216,7 +252,6 @@ export default function CapacityLoading() {
 
   const editable = canEdit()
 
-  // Build weekly capacity from allocations using working days
   const weeklyData = useMemo(() => {
     if (!lineAllocations.length && !orders.length) return []
     const now = new Date()
@@ -338,7 +373,7 @@ export default function CapacityLoading() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-slate-200">
-                      {['Order','Line Pair','Start','End','Alloc Qty','Daily Target','Working Days','Avg Pcs/Day','Notes',''].map(h => (
+                      {['Order','Portion','Line Pair','Start','End','Alloc Qty','Daily Target','Working Days','Avg Pcs/Day','Notes',''].map(h => (
                         <th key={h} className="text-left py-2 px-3 text-xs font-semibold text-slate-500 uppercase whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
@@ -354,6 +389,11 @@ export default function CapacityLoading() {
                               <span className="w-2 h-2 rounded-full" style={{ background: a.color }} />
                               <span className="font-semibold">{a.orderNo}</span>
                             </div>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            {a.portionName
+                              ? <span className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded font-medium">{a.portionName}</span>
+                              : <span className="text-xs text-slate-300">—</span>}
                           </td>
                           <td className="py-2.5 px-3">
                             <span className="font-medium">Line {String(a.linePairNo).padStart(2,'0')}</span>

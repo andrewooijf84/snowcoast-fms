@@ -13,6 +13,36 @@ import { fetchExistingOrderNos, createOrder, createLineAllocation, updateOrder }
 
 function str(v) { return String(v ?? '').trim() }
 
+// Parse the "Order Portions" sheet — returns { [orderNo]: portion[] }
+function parsePortionsSheet(rows) {
+  if (!rows || rows.length < 2) return {}
+  const portionsByOrder = {}
+  // Skip header row (row 0)
+  rows.slice(1).forEach(row => {
+    const [A, B, C, D, E, F, G, H, I, J] = row
+    if (!A && !B) return
+    const orderNo    = str(A)
+    const portionName = str(B) || 'Full order'
+    const portionQty  = Number(C) || 0
+    if (!orderNo) return
+    const portion = {
+      portionName,
+      portionQty,
+      materialArrivalDate: excelDateToString(D),
+      cutStartDate:        excelDateToString(E),
+      embStartDate:        excelDateToString(F),
+      sewStartDate:        excelDateToString(G),
+      completionDate:      excelDateToString(H),
+      exfactoryDate:       excelDateToString(I),
+      notes:               str(J),
+      status:              'pending',
+    }
+    if (!portionsByOrder[orderNo]) portionsByOrder[orderNo] = []
+    portionsByOrder[orderNo].push(portion)
+  })
+  return portionsByOrder
+}
+
 function parseOrderSheet(rows) {
   // rows[3] = header row (row 4), rows[4+] = data
   const data = rows.slice(4)
@@ -146,6 +176,10 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
       const rows = readSheetRows(wb, 'Order Import')
       if (!rows) throw new Error('Sheet "Order Import" not found in this file.')
 
+      // Parse Order Portions sheet (optional)
+      const portionRows = readSheetRows(wb, 'Order Portions')
+      const portionsData = parsePortionsSheet(portionRows)
+
       const { groups, errors } = parseOrderSheet(rows)
       if (!groups.length && !errors.length) throw new Error('No data rows found (sheet may be empty).')
 
@@ -159,7 +193,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
       const initDupActions = {}
       duplicates.forEach(o => { initDupActions[o.orderNo] = 'skip' })
 
-      setParsed({ valid, duplicates, errors })
+      setParsed({ valid, duplicates, errors, portionsData })
       setDupActions(initDupActions)
       setStep('preview')
     } catch (e) {
@@ -181,8 +215,24 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
 
     try {
       // Import valid orders
+      const portionsData = parsed.portionsData || {}
+
       for (const order of parsed.valid) {
         try {
+          // Build portions from "Order Portions" sheet, or create default from order dates
+          const portionList = portionsData[order.orderNo]
+          const portions = portionList && portionList.length > 0
+            ? portionList.map(p => ({
+                ...p,
+                materialArrivalDate: p.materialArrivalDate ? new Date(p.materialArrivalDate) : null,
+                cutStartDate:        p.cutStartDate        ? new Date(p.cutStartDate)        : null,
+                embStartDate:        p.embStartDate        ? new Date(p.embStartDate)        : null,
+                sewStartDate:        p.sewStartDate        ? new Date(p.sewStartDate)        : null,
+                completionDate:      p.completionDate      ? new Date(p.completionDate)      : null,
+                exfactoryDate:       p.exfactoryDate       ? new Date(p.exfactoryDate)       : null,
+              }))
+            : undefined // createOrder will auto-create "Full order" portion from order dates
+
           const saved = await createOrder({
             orderNo: order.orderNo, buyer: order.buyer, style: order.style,
             qty: order.qty, smv: order.smv,
@@ -195,6 +245,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
             completionDate: order.completionDate ? new Date(order.completionDate) : null,
             shipDate: order.shipDate ? new Date(order.shipDate) : null,
             notes: order.notes, status: 'pending', progress: 0, color: '#3b82f6',
+            portions,
           })
           for (const a of order.allocations) {
             if (a.startDate && a.endDate) {
@@ -284,9 +335,13 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
               {errMsg && <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 rounded-lg px-4 py-3"><AlertCircle className="w-4 h-4 shrink-0" />{errMsg}</div>}
               <div className="bg-slate-50 rounded-lg p-4 text-xs text-slate-500 space-y-1">
                 <p className="font-medium text-slate-700 mb-2">Expected sheet structure:</p>
-                <p>• Sheet name: <strong>Order Import</strong> — headers on row 4, data from row 5</p>
+                <p>• Sheet <strong>Order Import</strong> — headers on row 4, data from row 5</p>
                 <p>• Columns A–D (Order No, Customer, Style, Qty) are required</p>
                 <p>• Columns N–Q for line allocation (optional)</p>
+                <p className="pt-1 font-medium text-slate-600">Optional: Order Portions sheet</p>
+                <p>• Sheet <strong>Order Portions</strong> — A=Order No, B=Portion Name, C=Qty, D–I=Dates, J=Notes</p>
+                <p>• Multiple rows with same order number = multiple portions per order</p>
+                <p>• If sheet is missing, one "Full order" portion is created automatically</p>
               </div>
             </div>
           )}

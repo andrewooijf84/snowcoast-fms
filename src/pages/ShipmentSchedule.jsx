@@ -17,9 +17,17 @@ const STATUS_CONFIG = {
   delayed:   { label: 'Delayed', variant: 'danger',  icon: AlertTriangle },
 }
 
+const PORTION_STATUS_COLORS = {
+  'pending':       'bg-slate-100 text-slate-600',
+  'in-production': 'bg-blue-50 text-blue-700',
+  'completed':     'bg-green-50 text-green-700',
+  'shipped':       'bg-purple-50 text-purple-700',
+  'cancelled':     'bg-red-50 text-red-500',
+}
+
 function MilestoneTracker({ milestones }) {
   return (
-    <div className="flex items-center gap-0">
+    <div className="flex items-center gap-0 flex-wrap">
       {milestones.map((m, i) => (
         <div key={i} className="flex items-center">
           <div className="flex flex-col items-center">
@@ -32,7 +40,7 @@ function MilestoneTracker({ milestones }) {
             <span className="text-xs text-slate-400 mt-0.5 whitespace-nowrap" style={{ fontSize: 9 }}>{m.name}</span>
           </div>
           {i < milestones.length - 1 && (
-            <div className={`h-0.5 w-6 mx-0.5 mt-0 mb-4 ${m.done ? 'bg-green-400' : 'bg-slate-200'}`} />
+            <div className={`h-0.5 w-5 mx-0.5 mt-0 mb-4 ${m.done ? 'bg-green-400' : 'bg-slate-200'}`} />
           )}
         </div>
       ))}
@@ -51,8 +59,10 @@ function KPITile({ label, value, sub, color }) {
 }
 
 function ShipmentGapBadge({ order }) {
-  if (!order.completionDate || !order.shipDate) return null
-  const gap = shipmentGapWorkingDays(order.completionDate, order.shipDate)
+  const completionDate = order.completionDate
+  const shipDate = order.shipDate || order.latestExfactory
+  if (!completionDate || !shipDate) return null
+  const gap = shipmentGapWorkingDays(completionDate, shipDate)
   if (gap === null) return null
   if (gap < 0) {
     return (
@@ -75,6 +85,80 @@ function ShipmentGapBadge({ order }) {
     )
   }
   return null
+}
+
+// ── Per-portion milestone track ────────────────────────────────────────────────
+function PortionTrack({ portion, onToggleMilestone, isExpanded }) {
+  const { portionName, portionQty, status, milestones = [], exfactoryDate } = portion
+  const shippedQty = milestones.find(m => m.name === 'Ex-Factory')?.qtyShipped || 0
+  const daysLeft = exfactoryDate ? differenceInDays(new Date(exfactoryDate), new Date()) : null
+  const statusCls = PORTION_STATUS_COLORS[status] || PORTION_STATUS_COLORS.pending
+
+  return (
+    <div className="border border-slate-100 rounded-lg p-3 bg-slate-50/50">
+      {/* Portion header */}
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-slate-700">{portionName}</span>
+          <span className="text-xs text-slate-400">— {portionQty.toLocaleString()} pcs</span>
+          <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${statusCls}`}>{status}</span>
+        </div>
+        {exfactoryDate && (
+          <span className={`text-xs font-medium flex items-center gap-1 ${
+            daysLeft !== null && daysLeft < 0 ? 'text-red-600' : daysLeft !== null && daysLeft < 7 ? 'text-amber-600' : 'text-slate-500'
+          }`}>
+            <Ship className="w-3 h-3" />
+            {format(new Date(exfactoryDate), 'MMM dd')}
+            {daysLeft !== null && (
+              <span className="ml-0.5">
+                {daysLeft > 0 ? `(${daysLeft}d)` : daysLeft === 0 ? '(Today)' : `(${Math.abs(daysLeft)}d late)`}
+              </span>
+            )}
+          </span>
+        )}
+      </div>
+
+      {/* Milestone tracker */}
+      {milestones.length > 0 ? (
+        <>
+          <div className="overflow-auto pb-1">
+            <MilestoneTracker milestones={milestones} />
+          </div>
+          {isExpanded && (
+            <div className="mt-2 grid grid-cols-2 gap-1 text-xs">
+              {milestones.map((m, i) => (
+                <button key={i}
+                  onClick={() => m.id && onToggleMilestone(m.id, m.done)}
+                  className={`flex items-center gap-1.5 p-1.5 rounded text-left w-full transition-colors ${
+                    m.done ? 'bg-green-50 text-green-700 hover:bg-green-100'
+                    : m.date && new Date(m.date) < new Date() ? 'bg-red-50 text-red-700 hover:bg-red-100'
+                    : 'bg-white text-slate-600 hover:bg-slate-50 border border-slate-100'
+                  }`}>
+                  {m.done
+                    ? <CheckCircle2 className="w-3 h-3 flex-shrink-0" />
+                    : m.date && new Date(m.date) < new Date()
+                    ? <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                    : <Circle className="w-3 h-3 flex-shrink-0" />
+                  }
+                  <span className="font-medium truncate">{m.name}</span>
+                  {m.date && <span className="ml-auto opacity-70 flex-shrink-0">{format(new Date(m.date), 'MMM d')}</span>}
+                </button>
+              ))}
+            </div>
+          )}
+          {/* Shipped qty */}
+          {shippedQty > 0 && (
+            <p className="mt-1 text-xs text-slate-400">
+              Shipped: <span className="font-semibold text-green-600">{shippedQty.toLocaleString()} pcs</span>
+              {portionQty > 0 && <span className="ml-1">({Math.round(shippedQty / portionQty * 100)}%)</span>}
+            </p>
+          )}
+        </>
+      ) : (
+        <p className="text-xs text-slate-300 italic">No milestones</p>
+      )}
+    </div>
+  )
 }
 
 export default function ShipmentSchedule() {
@@ -143,9 +227,9 @@ export default function ShipmentSchedule() {
         {filtered.map((shipment) => {
           const cfg = STATUS_CONFIG[shipment.status] || STATUS_CONFIG.pending
           const StatusIcon = cfg.icon
-          const daysLeft = shipment.shipDate ? differenceInDays(new Date(shipment.shipDate), new Date()) : 0
           const shipPct = shipment.totalQty ? Math.round((shipment.shippedQty / shipment.totalQty) * 100) : 0
           const isSelected = selected === shipment.id
+          const portions = shipment.portions || []
 
           return (
             <Card key={shipment.id}
@@ -156,10 +240,13 @@ export default function ShipmentSchedule() {
                   <div
                     className="flex-1 cursor-pointer"
                     onClick={() => setSelected(isSelected ? null : shipment.id)}>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-bold text-slate-900">{shipment.orderNo}</span>
                       {shipment.requiresEmbroidery && (
                         <span className="text-xs bg-pink-100 text-pink-700 rounded px-1.5 py-0.5">Emb</span>
+                      )}
+                      {portions.length > 1 && (
+                        <span className="text-xs bg-blue-50 text-blue-600 rounded px-1.5 py-0.5">{portions.length} portions</span>
                       )}
                     </div>
                     <p className="text-xs text-slate-500 mt-0.5">{shipment.buyer} · {shipment.style}</p>
@@ -181,49 +268,30 @@ export default function ShipmentSchedule() {
                 {/* Shipment gap warning */}
                 <ShipmentGapBadge order={shipment} />
 
-                {/* Qty progress */}
+                {/* Overall qty progress */}
                 <div className="mt-3 mb-3 space-y-1.5">
                   <div className="flex justify-between text-xs text-slate-600">
-                    <span>{t('shipment.shipped')}: {(shipment.shippedQty || 0).toLocaleString()} pcs</span>
-                    <span>{t('shipment.totalQty')}: {(shipment.totalQty || 0).toLocaleString()} pcs</span>
+                    <span>Total shipped: {(shipment.shippedQty || 0).toLocaleString()} pcs</span>
+                    <span>Total: {(shipment.totalQty || 0).toLocaleString()} pcs</span>
                   </div>
-                  <Progress value={shipPct} className={shipment.status === 'delayed' ? '[&>*]:bg-red-500' : shipment.status === 'completed' ? '[&>*]:bg-green-500' : ''} />
-                  <div className="flex justify-between text-xs">
-                    <span className="text-slate-400">{shipPct}% shipped</span>
-                    {shipment.shipDate && (
-                      <span className={`font-medium ${daysLeft < 0 ? 'text-red-600' : daysLeft < 7 ? 'text-amber-600' : 'text-slate-600'}`}>
-                        <Ship className="w-3 h-3 inline mr-0.5" />
-                        {format(new Date(shipment.shipDate), 'MMM dd, yyyy')}
-                        {' '}
-                        {daysLeft > 0 ? `(${daysLeft}d)` : daysLeft === 0 ? '(Today!)' : `(${Math.abs(daysLeft)}d late)`}
-                      </span>
-                    )}
-                  </div>
+                  <Progress value={shipPct} className={
+                    shipment.status === 'delayed' ? '[&>*]:bg-red-500'
+                    : shipment.status === 'completed' ? '[&>*]:bg-green-500' : ''
+                  } />
+                  <div className="text-xs text-slate-400">{shipPct}% shipped</div>
                 </div>
 
-                {/* Milestones (expanded) */}
-                {isSelected && (
-                  <div className="border-t border-slate-100 pt-3 mt-3">
-                    <p className="text-xs font-semibold text-slate-500 uppercase mb-2">{t('shipment.milestones')}</p>
-                    <div className="overflow-auto">
-                      <MilestoneTracker milestones={shipment.milestones || []} />
-                    </div>
-                    <div className="mt-3 grid grid-cols-2 gap-1.5 text-xs">
-                      {(shipment.milestones || []).map((m, i) => (
-                        <button key={i}
-                          onClick={() => m.id && handleToggleMilestone(m.id, m.done)}
-                          className={`flex items-center gap-1.5 p-1.5 rounded text-left w-full transition-colors ${m.done ? 'bg-green-50 text-green-700 hover:bg-green-100' : m.date && new Date(m.date) < new Date() ? 'bg-red-50 text-red-700 hover:bg-red-100' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'}`}>
-                          {m.done
-                            ? <CheckCircle2 className="w-3 h-3 flex-shrink-0" />
-                            : m.date && new Date(m.date) < new Date()
-                            ? <AlertTriangle className="w-3 h-3 flex-shrink-0" />
-                            : <Circle className="w-3 h-3 flex-shrink-0" />
-                          }
-                          <span className="font-medium">{m.name}</span>
-                          {m.date && <span className="ml-auto opacity-70">{format(new Date(m.date), 'MMM d')}</span>}
-                        </button>
-                      ))}
-                    </div>
+                {/* Per-portion tracks */}
+                {portions.length > 0 && (
+                  <div className="space-y-2">
+                    {portions.map((portion, pi) => (
+                      <PortionTrack
+                        key={portion.id || pi}
+                        portion={portion}
+                        onToggleMilestone={handleToggleMilestone}
+                        isExpanded={isSelected}
+                      />
+                    ))}
                   </div>
                 )}
               </CardContent>
