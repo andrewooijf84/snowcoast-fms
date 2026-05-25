@@ -12,36 +12,37 @@ import { fetchExistingOrderNos, createOrder, updateOrder } from '@/lib/api'
 
 function str(v) { return String(v ?? '').trim() }
 
+// Robust date parser — handles JS Date, Excel serial number, and string formats
 function parseDate(v) {
   if (v === null || v === undefined || v === '') return null
-  // JS Date object (when cellDates:true)
   if (v instanceof Date) {
     if (isNaN(v.getTime())) return null
-    const y = v.getFullYear()
-    const m = String(v.getMonth() + 1).padStart(2, '0')
-    const d = String(v.getDate()).padStart(2, '0')
-    return `${y}-${m}-${d}`
+    const y  = v.getFullYear()
+    const mo = String(v.getMonth() + 1).padStart(2, '0')
+    const da = String(v.getDate()).padStart(2, '0')
+    return `${y}-${mo}-${da}`
   }
-  // Excel serial number
   if (typeof v === 'number') {
-    const d = new Date(Math.round((v - 25569) * 86400 * 1000))
+    // Excel serial → UTC date
+    const ms = Math.round((v - 25569) * 86400 * 1000)
+    const d  = new Date(ms)
     if (isNaN(d.getTime())) return null
-    const y = d.getUTCFullYear()
+    const y  = d.getUTCFullYear()
     const mo = String(d.getUTCMonth() + 1).padStart(2, '0')
     const da = String(d.getUTCDate()).padStart(2, '0')
     return `${y}-${mo}-${da}`
   }
-  // String "YYYY-MM-DD"
   if (typeof v === 'string') {
     const s = v.trim()
+    if (!s) return null
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
-    // Try parsing other string formats
+    // "6/15/2026" or "15/6/2026" or "Jun 15, 2026" etc.
     const d = new Date(s)
     if (!isNaN(d.getTime())) {
-      const y = d.getFullYear()
-      const m = String(d.getMonth() + 1).padStart(2, '0')
+      const y  = d.getFullYear()
+      const mo = String(d.getMonth() + 1).padStart(2, '0')
       const da = String(d.getDate()).padStart(2, '0')
-      return `${y}-${m}-${da}`
+      return `${y}-${mo}-${da}`
     }
   }
   return null
@@ -49,52 +50,74 @@ function parseDate(v) {
 
 // ── Parser ─────────────────────────────────────────────────────────────────────
 // Sheet: "Order & Portions"
-// Rows 1–6: title / labels / headers  →  skip (slice from index 6)
-// Row 7+: data
-// A=row#(ignore) B=order_no C=customer D=style E=order_qty
-// F=smv G=emb(YES/NO) H=season I=portion_name J=portion_qty
-// K=mat_arrival L=cut_start M=emb_start N=sew_start O=completion P=exfactory Q=notes
+// Col: A=row#(skip) B=order_no C=customer D=style E=order_qty
+//      F=smv G=emb(YES/NO) H=season I=portion_name J=portion_qty
+//      K=mat_arrival L=cut_start M=emb_start N=sew_start O=completion P=exfactory Q=notes
 
-const DATE_COLS  = ['K','L','M','N','O','P']
-const DATE_KEYS  = ['materialArrivalDate','cutStartDate','embStartDate','sewStartDate','completionDate','exfactoryDate']
+const DATE_COLS = ['K','L','M','N','O','P']
+const DATE_KEYS = ['materialArrivalDate','cutStartDate','embStartDate','sewStartDate','completionDate','exfactoryDate']
+
+// Words that indicate a row is a header / label, not data
+const HEADER_WORDS = new Set([
+  'order_number','order no','order no.','orderno','order number',
+  'b','col b','column b','#','no','no.',
+])
+
+function isHeaderCell(v) {
+  if (v === null || v === undefined || v === '') return false
+  return HEADER_WORDS.has(String(v).trim().toLowerCase())
+}
 
 function parseSheet(rows) {
-  // rows[0..5] = header block (rows 1–6 in Excel), rows[6+] = data
-  const data   = rows.slice(6)
-  const groups  = {}     // orderNo → order record
-  const errors  = []
-  const allPortions = [] // flat list for preview
+  // Auto-detect where data starts:
+  // Find the first row where col B is non-empty AND not a header keyword.
+  // This handles templates that have any number of title rows above.
+  let dataStart = 0
+  for (let i = 0; i < rows.length; i++) {
+    const b = rows[i][1]  // column B (index 1)
+    if (b !== null && b !== undefined && b !== '' && !isHeaderCell(b)) {
+      dataStart = i
+      break
+    }
+  }
+
+  const data        = rows.slice(dataStart)
+  const groups      = {}      // orderNo → order record
+  const errors      = []
+  const allPortions = []      // flat list for preview tab
 
   data.forEach((row, i) => {
     const [A, B, C, D, E, F, G, H, Ic, J, K, L, M, N, O, P, Q] = row
-    // Skip rows where B C D E are all empty
-    if (!B && !C && !D && !E) return
 
-    const rowNum  = i + 7  // Excel row number
-    const orderNo = str(B)
+    // Skip rows where B C D E are ALL empty/null
+    const empty = v => v === null || v === undefined || v === ''
+    if (empty(B) && empty(C) && empty(D) && empty(E)) return
+
+    const rowNum  = dataStart + i + 1   // 1-based row number for error messages
+    const orderNo  = str(B)
     const customer = str(C)
-    const style   = str(D)
-    const qty     = parseInt(E, 10) || 0
-    const smv     = (F !== null && F !== undefined && F !== '') ? Number(F) : null
+    const style    = str(D)
+    const qty      = parseInt(str(E), 10) || 0
+    const smv      = !empty(F) ? Number(F) : null
     const requiresEmbroidery = str(G).toUpperCase() === 'YES'
-    const season  = str(H)
+    const season   = str(H)
     const portionName = str(Ic) || 'Full order'
-    const portionQtyRaw = (J !== null && J !== undefined && J !== '') ? parseInt(J, 10) : null
+    const portionQtyRaw = !empty(J) ? parseInt(str(J), 10) : null
 
     const errs = []
-    if (!orderNo)  errs.push('Order No (col B) required')
-    if (!customer) errs.push('Customer (col C) required')
-    if (!style)    errs.push('Style (col D) required')
-    if (!E || qty <= 0) errs.push('Order Qty (col E) must be > 0')
+    if (!orderNo)  errs.push('Order No (col B) is required')
+    if (!customer) errs.push('Customer (col C) is required')
+    if (!style)    errs.push('Style (col D) is required')
+    if (empty(E) || qty <= 0) errs.push('Order Qty (col E) must be > 0')
     if (portionQtyRaw !== null && portionQtyRaw <= 0) errs.push('Portion Qty (col J) must be > 0')
 
-    // Parse dates K–P
+    // Parse date columns K–P
     const parsedDates = {}
     DATE_KEYS.forEach((key, di) => {
       const raw = [K, L, M, N, O, P][di]
-      if (raw !== null && raw !== undefined && raw !== '') {
+      if (!empty(raw)) {
         const s = parseDate(raw)
-        if (!s) errs.push(`Invalid date in col ${DATE_COLS[di]} (row ${rowNum})`)
+        if (!s) errs.push(`Invalid date in col ${DATE_COLS[di]}`)
         parsedDates[key] = s
       } else {
         parsedDates[key] = null
@@ -106,16 +129,10 @@ function parseSheet(rows) {
       return
     }
 
-    // Create order record on first occurrence
     if (!groups[orderNo]) {
       groups[orderNo] = {
-        orderNo,
-        buyer: customer,
-        style,
-        qty,
-        smv,
-        requiresEmbroidery,
-        season,
+        orderNo, buyer: customer, style, qty,
+        smv, requiresEmbroidery, season,
         notes: str(Q),
         portions: [],
         rowNum,
@@ -129,7 +146,13 @@ function parseSheet(rows) {
       ...parsedDates,
     }
     groups[orderNo].portions.push(portion)
-    allPortions.push({ orderNo, portionName, portionQty: portion.portionQty, sewStartDate: parsedDates.sewStartDate, exfactoryDate: parsedDates.exfactoryDate, completionDate: parsedDates.completionDate })
+    allPortions.push({
+      orderNo, portionName,
+      portionQty:    portion.portionQty,
+      sewStartDate:  parsedDates.sewStartDate,
+      completionDate: parsedDates.completionDate,
+      exfactoryDate: parsedDates.exfactoryDate,
+    })
   })
 
   return { groups: Object.values(groups), errors, allPortions }
@@ -199,46 +222,62 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
   const [result, setResult]         = useState(null)
   const [errMsg, setErrMsg]         = useState('')
   const [dragging, setDragging]     = useState(false)
+  const [debugInfo, setDebugInfo]   = useState('')
 
   const reset = () => {
-    setStep('upload'); setParsed(null); setDupActions({}); setResult(null); setErrMsg('')
+    setStep('upload'); setParsed(null); setDupActions({})
+    setResult(null); setErrMsg(''); setDebugInfo('')
   }
   const handleClose = () => { reset(); onClose() }
 
   const processFile = useCallback(async (file) => {
     if (!file?.name.endsWith('.xlsx')) { setErrMsg('Please upload an .xlsx file.'); return }
-    setStep('parsing'); setErrMsg('')
+    setStep('parsing'); setErrMsg(''); setDebugInfo('')
     try {
       const buf = await file.arrayBuffer()
-      // cellDates: true → date cells come as JS Date objects
       const wb  = XLSX.read(buf, { type: 'array', cellDates: true })
 
-      // Find the sheet — try exact name, then case-insensitive fallback
-      const targetName = Object.keys(wb.Sheets).find(
-        n => n.trim().toLowerCase() === 'order & portions'
+      const sheetNames = Object.keys(wb.Sheets)
+
+      // Find sheet — case-insensitive, ignoring extra spaces
+      const targetName = sheetNames.find(
+        n => n.trim().toLowerCase().replace(/\s+/g, ' ') === 'order & portions'
       )
       if (!targetName) {
-        const found = Object.keys(wb.Sheets).join(', ')
-        throw new Error(`Sheet "Order & Portions" not found. Sheets in this file: ${found || '(none)'}`)
+        throw new Error(
+          `Sheet "Order & Portions" not found.\nSheets in this file: ${sheetNames.join(', ') || '(none)'}`
+        )
       }
 
       const ws   = wb.Sheets[targetName]
-      // defval: '' so empty cells are '' not undefined
-      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false })
-      // raw: false → XLSX formats values (dates become strings like "2026-06-15")
-      // This is the most reliable for mixed-type sheets
+      // raw: true + cellDates: true → date cells come as JS Date objects, numbers as numbers, strings as strings
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: true })
 
-      if (rows.length < 7) throw new Error('File has fewer than 7 rows — check the template format.')
+      if (!rows.length) throw new Error('The sheet is empty.')
+
+      // Debug info — show first 8 rows so we can diagnose layout issues
+      const preview = rows.slice(0, 8).map((r, i) =>
+        `Row ${i+1}: B="${r[1]}" C="${r[2]}" D="${r[3]}" E="${r[4]}"`
+      ).join('\n')
+      setDebugInfo(`Sheet found: "${targetName}"\nRows read: ${rows.length}\n\nFirst 8 rows:\n${preview}`)
 
       const { groups, errors, allPortions } = parseSheet(rows)
-      if (!groups.length && !errors.length) throw new Error('No data rows found — the sheet may be empty after row 6.')
 
-      const allNos     = groups.map(o => o.orderNo)
-      const existing   = await fetchExistingOrderNos(allNos)
+      if (!groups.length && !errors.length) {
+        throw new Error(
+          `No data rows found. Check that:\n` +
+          `• Column B has order numbers starting from row 7\n` +
+          `• The sheet name is exactly "Order & Portions"`
+        )
+      }
+
+      const allNos      = groups.map(o => o.orderNo)
+      const existing    = await fetchExistingOrderNos(allNos)
       const existingMap = Object.fromEntries(existing.map(r => [r.order_no, r.id]))
 
       const valid      = groups.filter(o => !existingMap[o.orderNo])
-      const duplicates = groups.filter(o =>  existingMap[o.orderNo]).map(o => ({ ...o, existingId: existingMap[o.orderNo] }))
+      const duplicates = groups.filter(o =>  existingMap[o.orderNo])
+        .map(o => ({ ...o, existingId: existingMap[o.orderNo] }))
 
       const initDup = {}
       duplicates.forEach(o => { initDup[o.orderNo] = 'skip' })
@@ -258,7 +297,6 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
     if (file) processFile(file)
   }, [processFile])
 
-  // Convert string dates in a portion to Date objects for the API
   function hydratePortion(p) {
     return {
       ...p,
@@ -278,22 +316,14 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
 
     try {
       const importOne = async (order) => {
-        const portions    = order.portions.map(hydratePortion)
+        const portions     = order.portions.map(hydratePortion)
         const firstPortion = portions[0] ?? {}
-
         await createOrder({
-          orderNo: order.orderNo,
-          buyer:   order.buyer,
-          style:   order.style,
-          qty:     order.qty,
-          smv:     order.smv,
+          orderNo: order.orderNo, buyer: order.buyer, style: order.style,
+          qty: order.qty, smv: order.smv,
           requiresEmbroidery: order.requiresEmbroidery,
-          season:  order.season,
-          notes:   order.notes,
-          status:  'pending',
-          progress: 0,
-          color:   '#3b82f6',
-          // Legacy flat date fields (taken from first portion)
+          season: order.season, notes: order.notes,
+          status: 'pending', progress: 0, color: '#3b82f6',
           materialArrivalDate: firstPortion.materialArrivalDate ?? null,
           cutStartDate:        firstPortion.cutStartDate        ?? null,
           embStartDate:        firstPortion.embStartDate        ?? null,
@@ -309,13 +339,9 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
       const overwriteOne = async (order) => {
         const portions = order.portions.map(hydratePortion)
         await updateOrder(order.existingId, {
-          buyer:   order.buyer,
-          style:   order.style,
-          qty:     order.qty,
-          smv:     order.smv,
+          buyer: order.buyer, style: order.style, qty: order.qty, smv: order.smv,
           requiresEmbroidery: order.requiresEmbroidery,
-          season:  order.season,
-          notes:   order.notes,
+          season: order.season, notes: order.notes,
           portions,
         })
         portionsImported += portions.length
@@ -326,14 +352,11 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
         try   { await importOne(order) }
         catch (e) { failed++; failedRows.push({ Order: order.orderNo, Error: e.message }) }
       }
-
       for (const order of parsed.duplicates) {
         if ((dupActions[order.orderNo] || 'skip') === 'overwrite') {
           try   { await overwriteOne(order) }
           catch (e) { failed++; failedRows.push({ Order: order.orderNo, Error: e.message }) }
-        } else {
-          skipped++
-        }
+        } else { skipped++ }
       }
 
       setResult({ imported, skipped, failed, errors: parsed.errors.length, failedRows, portionsImported })
@@ -350,8 +373,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
   const totalErrors = parsed?.errors.length      ?? 0
   const allOrders   = parsed ? [...parsed.valid, ...parsed.duplicates] : []
   const allPortions = parsed?.allPortions ?? []
-
-  const canImport = totalValid > 0 || Object.values(dupActions).some(a => a === 'overwrite')
+  const canImport   = totalValid > 0 || Object.values(dupActions).some(a => a === 'overwrite')
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
@@ -388,18 +410,23 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
               {errMsg && (
                 <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 rounded-lg px-4 py-3">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{errMsg}</span>
+                  <pre className="whitespace-pre-wrap font-sans">{errMsg}</pre>
                 </div>
+              )}
+
+              {debugInfo && (
+                <details className="bg-slate-50 rounded-lg p-3">
+                  <summary className="text-xs font-medium text-slate-500 cursor-pointer">Debug info</summary>
+                  <pre className="text-xs text-slate-400 mt-2 whitespace-pre-wrap">{debugInfo}</pre>
+                </details>
               )}
 
               <div className="bg-slate-50 rounded-lg p-4 text-xs text-slate-500 space-y-1">
                 <p className="font-semibold text-slate-700 mb-2">Template: SnowCoast_Order_Import_Simple.xlsx</p>
-                <p>• Sheet name: <strong>"Order &amp; Portions"</strong></p>
-                <p>• Rows 1–6: title / labels (skip automatically)</p>
+                <p>• Sheet name must be: <strong>"Order &amp; Portions"</strong></p>
+                <p>• Rows 1–6: title / labels (skipped automatically)</p>
                 <p>• Row 7+: data — one row per portion</p>
-                <p>• Col B–E required (Order No, Customer, Style, Qty)</p>
-                <p>• Col I–J: Portion Name, Portion Qty</p>
-                <p>• Col K–P: 6 date fields</p>
+                <p>• Col B–E required · Col I–J: portion name &amp; qty · Col K–P: dates</p>
                 <p>• Same Order No on multiple rows = multiple portions</p>
               </div>
             </div>
@@ -416,7 +443,6 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
           {/* ── Preview ── */}
           {step === 'preview' && parsed && (
             <div className="space-y-4">
-              {/* Summary chips */}
               <div className="flex gap-3 flex-wrap">
                 <span className="inline-flex items-center gap-1.5 text-sm text-green-700 bg-green-50 px-3 py-1.5 rounded-full font-medium">
                   <CheckCircle className="w-4 h-4" />{totalValid} new orders
@@ -432,7 +458,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
                   </span>
                 )}
                 <span className="inline-flex items-center gap-1.5 text-sm text-slate-600 bg-slate-100 px-3 py-1.5 rounded-full font-medium">
-                  {allPortions.length} portions total
+                  {allPortions.length} portions
                 </span>
               </div>
 
@@ -443,76 +469,63 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
                   <TabsTrigger value="errors">Errors ({totalErrors})</TabsTrigger>
                 </TabsList>
 
-                {/* Orders tab */}
                 <TabsContent value="orders" className="mt-3">
-                  <PagedTable
-                    rows={allOrders}
-                    columns={[
-                      { key: 'orderNo', label: 'Order No', render: r => (
-                        <span className="flex items-center gap-1.5">
-                          {r.existingId && <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">dup</span>}
-                          <span className="font-semibold">{r.orderNo}</span>
-                        </span>
-                      )},
-                      { key: 'buyer',   label: 'Customer' },
-                      { key: 'style',   label: 'Style' },
-                      { key: 'qty',     label: 'Qty', render: r => r.qty.toLocaleString() },
-                      { key: 'portions',label: 'Portions', render: r => (
-                        <span className="text-xs bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-medium">
-                          {r.portions?.length ?? 1}p
-                        </span>
-                      )},
-                      { key: 'requiresEmbroidery', label: 'Emb', render: r =>
-                        r.requiresEmbroidery
-                          ? <span className="text-pink-600 font-medium text-xs">YES</span>
-                          : <span className="text-slate-300">—</span>
-                      },
-                    ]}
-                    extra={row => row.existingId ? (
-                      <div className="flex gap-1.5">
-                        {['skip','overwrite'].map(a => (
-                          <button key={a}
-                            onClick={() => setDupActions(p => ({ ...p, [row.orderNo]: a }))}
-                            className={`text-xs px-2.5 py-1 rounded-full font-medium border transition-colors ${
-                              (dupActions[row.orderNo] || 'skip') === a
-                                ? a === 'skip'
-                                  ? 'bg-slate-700 text-white border-slate-700'
-                                  : 'bg-amber-500 text-white border-amber-500'
-                                : 'border-slate-300 text-slate-600 hover:border-slate-400'
-                            }`}>
-                            {a === 'skip' ? 'Skip' : 'Overwrite'}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                  />
+                  <PagedTable rows={allOrders} columns={[
+                    { key: 'orderNo', label: 'Order No', render: r => (
+                      <span className="flex items-center gap-1.5">
+                        {r.existingId && <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">dup</span>}
+                        <span className="font-semibold">{r.orderNo}</span>
+                      </span>
+                    )},
+                    { key: 'buyer',   label: 'Customer' },
+                    { key: 'style',   label: 'Style' },
+                    { key: 'qty',     label: 'Qty', render: r => r.qty.toLocaleString() },
+                    { key: 'portions',label: 'Portions', render: r => (
+                      <span className="text-xs bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-medium">
+                        {r.portions?.length ?? 1}p
+                      </span>
+                    )},
+                    { key: 'requiresEmbroidery', label: 'Emb', render: r =>
+                      r.requiresEmbroidery
+                        ? <span className="text-pink-600 font-medium text-xs">YES</span>
+                        : <span className="text-slate-300">—</span>
+                    },
+                  ]} extra={row => row.existingId ? (
+                    <div className="flex gap-1.5">
+                      {['skip','overwrite'].map(a => (
+                        <button key={a}
+                          onClick={() => setDupActions(p => ({ ...p, [row.orderNo]: a }))}
+                          className={`text-xs px-2.5 py-1 rounded-full font-medium border transition-colors ${
+                            (dupActions[row.orderNo] || 'skip') === a
+                              ? a === 'skip'
+                                ? 'bg-slate-700 text-white border-slate-700'
+                                : 'bg-amber-500 text-white border-amber-500'
+                              : 'border-slate-300 text-slate-600 hover:border-slate-400'
+                          }`}>
+                          {a === 'skip' ? 'Skip' : 'Overwrite'}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null} />
                 </TabsContent>
 
-                {/* Portions tab */}
                 <TabsContent value="portions" className="mt-3">
-                  <PagedTable
-                    rows={allPortions}
-                    columns={[
-                      { key: 'orderNo',       label: 'Order No' },
-                      { key: 'portionName',   label: 'Portion' },
-                      { key: 'portionQty',    label: 'Qty', render: r => r.portionQty?.toLocaleString() ?? '—' },
-                      { key: 'sewStartDate',  label: 'Sew Start' },
-                      { key: 'completionDate',label: 'Completion' },
-                      { key: 'exfactoryDate', label: 'Ex-Factory' },
-                    ]}
-                  />
+                  <PagedTable rows={allPortions} columns={[
+                    { key: 'orderNo',       label: 'Order No' },
+                    { key: 'portionName',   label: 'Portion' },
+                    { key: 'portionQty',    label: 'Qty', render: r => r.portionQty?.toLocaleString() ?? '—' },
+                    { key: 'sewStartDate',  label: 'Sew Start' },
+                    { key: 'completionDate',label: 'Completion' },
+                    { key: 'exfactoryDate', label: 'Ex-Factory' },
+                  ]} />
                 </TabsContent>
 
-                {/* Errors tab */}
                 <TabsContent value="errors" className="mt-3">
-                  <PagedTable
-                    rows={parsed.errors}
-                    columns={[
-                      { key: 'rowNum',  label: 'Row' },
-                      { key: 'orderNo', label: 'Order No' },
-                      { key: 'error',   label: 'Error' },
-                    ]}
-                  />
+                  <PagedTable rows={parsed.errors} columns={[
+                    { key: 'rowNum',  label: 'Row' },
+                    { key: 'orderNo', label: 'Order No' },
+                    { key: 'error',   label: 'Error' },
+                  ]} />
                 </TabsContent>
               </Tabs>
 
