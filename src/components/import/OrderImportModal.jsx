@@ -8,169 +8,150 @@ import { Spinner } from '@/components/ui/spinner'
 import { downloadExcelReport } from '@/lib/excelImport'
 import { fetchExistingOrderNos, createOrder, updateOrder } from '@/lib/api'
 
-// ── Date parser ────────────────────────────────────────────────────────────────
-// Always uses UTC to avoid timezone shift bugs
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+function str(v) { return String(v ?? '').trim() }
 
 function parseDate(v) {
   if (v === null || v === undefined || v === '') return null
-  // JS Date object (cellDates: true) — use UTC to avoid local-timezone shift
   if (v instanceof Date) {
     if (isNaN(v.getTime())) return null
+    // Use UTC to avoid day-shift from timezone offset
     const y  = v.getUTCFullYear()
     const mo = String(v.getUTCMonth() + 1).padStart(2, '0')
     const da = String(v.getUTCDate()).padStart(2, '0')
     return `${y}-${mo}-${da}`
   }
-  // Excel serial number
   if (typeof v === 'number') {
-    const ms = Math.round((v - 25569) * 86400 * 1000)
-    const d  = new Date(ms)
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000))
     if (isNaN(d.getTime())) return null
-    const y  = d.getUTCFullYear()
-    const mo = String(d.getUTCMonth() + 1).padStart(2, '0')
-    const da = String(d.getUTCDate()).padStart(2, '0')
-    return `${y}-${mo}-${da}`
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`
   }
-  // String
   if (typeof v === 'string') {
     const s = v.trim()
     if (!s) return null
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
     const d = new Date(s)
-    if (!isNaN(d.getTime())) {
-      const y  = d.getUTCFullYear()
-      const mo = String(d.getUTCMonth() + 1).padStart(2, '0')
-      const da = String(d.getUTCDate()).padStart(2, '0')
-      return `${y}-${mo}-${da}`
-    }
+    if (!isNaN(d.getTime()))
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`
   }
   return null
 }
 
-function str(v) { return String(v ?? '').trim() }
-
-// ── Header detection ───────────────────────────────────────────────────────────
-// Finds the header row by looking for known column names.
-// Returns { headerRowIndex, colMap } where colMap maps field name → array index.
-
-const KNOWN_HEADERS = {
-  order_number:          ['order_number','order no','order no.','order number','orderno','po number','po no'],
-  customer:              ['customer','buyer','client'],
-  style_code:            ['style_code','style code','style','style no','style_no'],
-  order_qty:             ['order_qty','order qty','qty','quantity','order quantity'],
-  smv:                   ['smv'],
-  requires_embroidery:   ['requires_embroidery','embroidery','emb','requires embroidery'],
-  season:                ['season'],
-  portion_name:          ['portion_name','portion name','portion','delivery'],
-  portion_qty:           ['portion_qty','portion qty','portion quantity'],
-  date_material_arrival: ['date_material_arrival','material arrival','material arrival date','mat arrival','mat date'],
-  date_cut_start:        ['date_cut_start','cut start','cut start date','cut date'],
-  date_emb_start:        ['date_emb_start','emb start','embroidery start','emb start date'],
-  date_sew_start:        ['date_sew_start','sew start','sewing start','sew start date','sew date'],
-  date_completion:       ['date_completion','completion','completion date','complete date'],
-  date_exfactory:        ['date_exfactory','exfactory','ex-factory','ex factory','ship date','ex-factory date'],
-  notes:                 ['notes','note','remarks'],
-}
-
-function findHeaderRow(rows) {
-  for (let i = 0; i < Math.min(rows.length, 15); i++) {
-    const row    = rows[i]
-    const normalized = row.map(v => String(v ?? '').trim().toLowerCase())
-
-    // Score this row: how many known headers does it contain?
-    let hits = 0
-    for (const [field, aliases] of Object.entries(KNOWN_HEADERS)) {
-      if (aliases.some(a => normalized.includes(a))) hits++
-    }
-    if (hits >= 3) {
-      // Found the header row — build the column map
-      const colMap = {}
-      for (const [field, aliases] of Object.entries(KNOWN_HEADERS)) {
-        for (const alias of aliases) {
-          const idx = normalized.indexOf(alias)
-          if (idx !== -1) { colMap[field] = idx; break }
-        }
-      }
-      return { headerRowIndex: i, colMap }
-    }
-  }
-  return null
+function parseNum(v) {
+  if (v === null || v === undefined || v === '') return null
+  const n = Number(String(v).replace(/,/g, ''))
+  return isNaN(n) ? null : n
 }
 
 // ── Parser ─────────────────────────────────────────────────────────────────────
+// Finds the cell containing "order_number" → that is column B.
+// All other columns are at fixed offsets from column B per the template spec:
+//   B+0 = order_number  B+1 = customer    B+2 = style_code
+//   B+3 = order_qty     B+4 = smv         B+5 = requires_embroidery
+//   B+6 = season        B+7 = portion_name B+8 = portion_qty
+//   B+9..B+14 = 6 date fields             B+15 = notes
+
+const ORDER_NO_ALIASES = ['order_number','order no','order no.','order number','orderno','po number','po no']
 
 function parseSheet(rows) {
-  const headerInfo = findHeaderRow(rows)
-  if (!headerInfo) {
-    return {
-      groups: [], errors: [], allPortions: [],
-      debugMsg: 'Could not find header row. Expected a row containing "order_number", "customer", "order_qty" etc. in the first 15 rows.'
+  // Step 1: find the header row and column-B index
+  let headerRowIndex = -1
+  let colB = -1
+
+  outer:
+  for (let r = 0; r < Math.min(rows.length, 20); r++) {
+    for (let c = 0; c < rows[r].length; c++) {
+      const cell = String(rows[r][c] ?? '').trim().toLowerCase().replace(/\s+/g, '_')
+      if (ORDER_NO_ALIASES.includes(cell)) {
+        headerRowIndex = r
+        colB = c
+        break outer
+      }
     }
   }
 
-  const { headerRowIndex, colMap } = headerInfo
-  const data = rows.slice(headerRowIndex + 1)
+  if (headerRowIndex === -1 || colB === -1) {
+    return {
+      groups: [], errors: [], allPortions: [],
+      debugMsg: `Could not find header cell "order_number" in the first 20 rows.\nCheck that your sheet has this exact column header (case-insensitive).`
+    }
+  }
 
+  // Column indices — fixed offsets from colB
+  const C = {
+    orderNo:     colB + 0,
+    customer:    colB + 1,
+    style:       colB + 2,
+    orderQty:    colB + 3,
+    smv:         colB + 4,
+    emb:         colB + 5,
+    season:      colB + 6,
+    portionName: colB + 7,
+    portionQty:  colB + 8,
+    matDate:     colB + 9,
+    cutDate:     colB + 10,
+    embDate:     colB + 11,
+    sewDate:     colB + 12,
+    compDate:    colB + 13,
+    exfDate:     colB + 14,
+    notes:       colB + 15,
+  }
+
+  const debugMsg =
+    `Header found at row ${headerRowIndex + 1}, col index ${colB} (Excel col ${String.fromCharCode(65 + colB)})\n` +
+    `Data starts from row ${headerRowIndex + 2}\n` +
+    `order_number=col${colB}  order_qty=col${C.orderQty}  sew_start=col${C.sewDate}  exfactory=col${C.exfDate}`
+
+  const data        = rows.slice(headerRowIndex + 1)
   const groups      = {}
   const errors      = []
   const allPortions = []
 
-  // Helper to get cell value by field name
-  const get = (row, field) => {
-    const idx = colMap[field]
-    return idx !== undefined ? row[idx] : null
-  }
-
   data.forEach((row, i) => {
-    const b = get(row, 'order_number')
-    const c = get(row, 'customer')
-    const d = get(row, 'style_code')
-    const e = get(row, 'order_qty')
+    const b = row[C.orderNo]
+    const c = row[C.customer]
+    const d = row[C.style]
+    const e = row[C.orderQty]
 
-    // Skip blank rows
+    // Skip rows where all key fields are empty
     const empty = v => v === null || v === undefined || v === ''
     if (empty(b) && empty(c) && empty(d) && empty(e)) return
 
-    const rowNum  = headerRowIndex + i + 2   // Excel 1-based row number
+    const rowNum   = headerRowIndex + i + 2
     const orderNo  = str(b)
     const customer = str(c)
     const style    = str(d)
-    const qty      = Number(str(e).replace(/,/g, '')) || 0
+    const qty      = parseNum(e) ?? 0
 
-    const portionNameRaw = get(row, 'portion_name')
-    const portionQtyRaw  = get(row, 'portion_qty')
-    const portionName    = str(portionNameRaw) || 'Full order'
-    const portionQty     = portionQtyRaw !== null && portionQtyRaw !== undefined && portionQtyRaw !== ''
-      ? Number(str(String(portionQtyRaw)).replace(/,/g, '')) : null
-
-    const smvRaw = get(row, 'smv')
-    const smv    = smvRaw !== null && smvRaw !== undefined && smvRaw !== '' ? Number(smvRaw) : null
-    const requiresEmbroidery = str(get(row, 'requires_embroidery')).toUpperCase() === 'YES'
-    const season = str(get(row, 'season'))
-    const notes  = str(get(row, 'notes'))
+    const portionName = str(row[C.portionName]) || 'Full order'
+    const portionQty  = parseNum(row[C.portionQty])
+    const smv         = parseNum(row[C.smv])
+    const requiresEmbroidery = str(row[C.emb]).toUpperCase() === 'YES'
+    const season      = str(row[C.season])
+    const notes       = str(row[C.notes])
 
     const errs = []
-    if (!orderNo)  errs.push('Order No is required')
-    if (!customer) errs.push('Customer is required')
-    if (!style)    errs.push('Style is required')
-    if (empty(e) || qty <= 0) errs.push('Order Qty must be > 0')
+    if (!orderNo)  errs.push('Order No required')
+    if (!customer) errs.push('Customer required')
+    if (!style)    errs.push('Style required')
+    if (empty(e) || qty <= 0) errs.push(`Order Qty must be > 0 (got: "${e}")`)
     if (portionQty !== null && portionQty <= 0) errs.push('Portion Qty must be > 0')
 
-    // Parse the 6 date fields
-    const DATE_FIELD_KEYS = [
-      ['date_material_arrival', 'materialArrivalDate'],
-      ['date_cut_start',        'cutStartDate'],
-      ['date_emb_start',        'embStartDate'],
-      ['date_sew_start',        'sewStartDate'],
-      ['date_completion',       'completionDate'],
-      ['date_exfactory',        'exfactoryDate'],
+    const DATE_FIELDS = [
+      [C.matDate,  'materialArrivalDate'],
+      [C.cutDate,  'cutStartDate'],
+      [C.embDate,  'embStartDate'],
+      [C.sewDate,  'sewStartDate'],
+      [C.compDate, 'completionDate'],
+      [C.exfDate,  'exfactoryDate'],
     ]
     const parsedDates = {}
-    for (const [field, key] of DATE_FIELD_KEYS) {
-      const raw = get(row, field)
+    for (const [idx, key] of DATE_FIELDS) {
+      const raw = row[idx]
       if (!empty(raw)) {
         const s = parseDate(raw)
-        if (!s) errs.push(`Invalid date in "${field}"`)
+        if (!s) errs.push(`Invalid date col${idx} (value: "${raw}")`)
         parsedDates[key] = s
       } else {
         parsedDates[key] = null
@@ -205,11 +186,6 @@ function parseSheet(rows) {
       exfactoryDate:  parsedDates.exfactoryDate,
     })
   })
-
-  const debugMsg =
-    `Header row: ${headerRowIndex + 1}\n` +
-    `Columns found: ${Object.entries(colMap).map(([k,v]) => `${k}→col${v+1}`).join(', ')}\n` +
-    `Data rows: ${data.length} · Orders: ${Object.keys(groups).length} · Errors: ${errors.length}`
 
   return { groups: Object.values(groups), errors, allPortions, debugMsg }
 }
@@ -297,16 +273,13 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
 
       const ws   = wb.Sheets[targetName]
       const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: true })
-
-      if (!rows.length) throw new Error('The sheet is empty.')
+      if (!rows.length) throw new Error('The sheet appears to be empty.')
 
       const { groups, errors, allPortions, debugMsg: dm } = parseSheet(rows)
       setDebugMsg(dm || '')
 
       if (!groups.length && !errors.length) {
-        throw new Error(
-          `No data rows found.\n${dm || ''}\n\nCheck that column headers like "order_number", "customer", "order_qty" exist in your sheet.`
-        )
+        throw new Error(`No data rows found.\n\n${dm || ''}\n\nMake sure column B header says "order_number".`)
       }
 
       const allNos      = groups.map(o => o.orderNo)
@@ -353,8 +326,8 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
     const failedRows = []
     try {
       const importOne = async (order) => {
-        const portions     = order.portions.map(hydratePortion)
-        const fp           = portions[0] ?? {}
+        const portions = order.portions.map(hydratePortion)
+        const fp       = portions[0] ?? {}
         await createOrder({
           orderNo: order.orderNo, buyer: order.buyer, style: order.style,
           qty: order.qty, smv: order.smv,
@@ -403,9 +376,9 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
     }
   }
 
-  const totalValid  = parsed?.valid.length       ?? 0
-  const totalDupes  = parsed?.duplicates.length  ?? 0
-  const totalErrors = parsed?.errors.length      ?? 0
+  const totalValid  = parsed?.valid.length      ?? 0
+  const totalDupes  = parsed?.duplicates.length ?? 0
+  const totalErrors = parsed?.errors.length     ?? 0
   const allOrders   = parsed ? [...parsed.valid, ...parsed.duplicates] : []
   const allPortions = parsed?.allPortions ?? []
   const canImport   = totalValid > 0 || Object.values(dupActions).some(a => a === 'overwrite')
@@ -450,11 +423,11 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
               )}
 
               <div className="bg-slate-50 rounded-lg p-4 text-xs text-slate-500 space-y-1">
-                <p className="font-semibold text-slate-700 mb-2">Template: SnowCoast_Order_Import_Simple.xlsx</p>
-                <p>• Sheet name must be: <strong>"Order &amp; Portions"</strong></p>
-                <p>• Must have a header row containing: <code>order_number</code>, <code>customer</code>, <code>order_qty</code>, etc.</p>
-                <p>• Data rows follow immediately after the header row</p>
-                <p>• Same Order No on multiple rows = multiple portions</p>
+                <p className="font-semibold text-slate-700 mb-1">Template: SnowCoast_Order_Import_Simple.xlsx</p>
+                <p>• Sheet name: <strong>"Order &amp; Portions"</strong></p>
+                <p>• Column B header must say <code>order_number</code> (the parser finds it automatically)</p>
+                <p>• Data rows follow right after the header row</p>
+                <p>• Same Order No across rows = multiple portions</p>
               </div>
             </div>
           )}
@@ -463,7 +436,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
           {step === 'parsing' && (
             <div className="flex flex-col items-center gap-4 py-16">
               <Spinner className="w-10 h-10" />
-              <p className="text-sm text-slate-600">Reading and validating Excel file…</p>
+              <p className="text-sm text-slate-600">Reading Excel file…</p>
             </div>
           )}
 
@@ -472,7 +445,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
             <div className="space-y-4">
               <div className="flex gap-3 flex-wrap">
                 <span className="inline-flex items-center gap-1.5 text-sm text-green-700 bg-green-50 px-3 py-1.5 rounded-full font-medium">
-                  <CheckCircle className="w-4 h-4" />{totalValid} new orders
+                  <CheckCircle className="w-4 h-4" />{totalValid} new
                 </span>
                 {totalDupes > 0 && (
                   <span className="inline-flex items-center gap-1.5 text-sm text-amber-700 bg-amber-50 px-3 py-1.5 rounded-full font-medium">
@@ -484,20 +457,19 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
                     <AlertCircle className="w-4 h-4" />{totalErrors} errors
                   </span>
                 )}
-                <span className="inline-flex items-center gap-1.5 text-sm text-slate-600 bg-slate-100 px-3 py-1.5 rounded-full font-medium">
+                <span className="text-sm text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full font-medium">
                   {allPortions.length} portions
                 </span>
               </div>
 
-              {/* Debug info — always visible in preview so user can verify column mapping */}
               {debugMsg && (
-                <details className="bg-blue-50 border border-blue-100 rounded-lg p-3">
-                  <summary className="text-xs font-medium text-blue-600 cursor-pointer">Column mapping detected</summary>
-                  <pre className="text-xs text-slate-500 mt-2 whitespace-pre-wrap">{debugMsg}</pre>
+                <details open className="bg-blue-50 border border-blue-100 rounded-lg p-3">
+                  <summary className="text-xs font-semibold text-blue-700 cursor-pointer">Column mapping — verify this is correct</summary>
+                  <pre className="text-xs text-slate-600 mt-2 whitespace-pre-wrap">{debugMsg}</pre>
                 </details>
               )}
 
-              <Tabs defaultValue="orders">
+              <Tabs defaultValue={totalErrors > 0 && totalValid === 0 ? 'errors' : 'orders'}>
                 <TabsList>
                   <TabsTrigger value="orders">Orders ({allOrders.length})</TabsTrigger>
                   <TabsTrigger value="portions">Portions ({allPortions.length})</TabsTrigger>
@@ -586,8 +558,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
                 <div>
                   <p className="font-semibold text-slate-800">Import complete</p>
                   <p className="text-sm text-slate-500 mt-0.5">
-                    {result.imported} order{result.imported !== 1 ? 's' : ''} and{' '}
-                    {result.portionsImported} portion{result.portionsImported !== 1 ? 's' : ''} imported
+                    {result.imported} order{result.imported !== 1 ? 's' : ''} and {result.portionsImported} portion{result.portionsImported !== 1 ? 's' : ''} imported
                     {result.skipped > 0 ? ` · ${result.skipped} skipped` : ''}
                     {(result.errors + result.failed) > 0 ? ` · ${result.errors + result.failed} errors` : ''}
                   </p>
