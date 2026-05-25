@@ -8,22 +8,21 @@ import { Spinner } from '@/components/ui/spinner'
 import { downloadExcelReport } from '@/lib/excelImport'
 import { fetchExistingOrderNos, createOrder, updateOrder } from '@/lib/api'
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── Date parser ────────────────────────────────────────────────────────────────
+// Always uses UTC to avoid timezone shift bugs
 
-function str(v) { return String(v ?? '').trim() }
-
-// Robust date parser — handles JS Date, Excel serial number, and string formats
 function parseDate(v) {
   if (v === null || v === undefined || v === '') return null
+  // JS Date object (cellDates: true) — use UTC to avoid local-timezone shift
   if (v instanceof Date) {
     if (isNaN(v.getTime())) return null
-    const y  = v.getFullYear()
-    const mo = String(v.getMonth() + 1).padStart(2, '0')
-    const da = String(v.getDate()).padStart(2, '0')
+    const y  = v.getUTCFullYear()
+    const mo = String(v.getUTCMonth() + 1).padStart(2, '0')
+    const da = String(v.getUTCDate()).padStart(2, '0')
     return `${y}-${mo}-${da}`
   }
+  // Excel serial number
   if (typeof v === 'number') {
-    // Excel serial → UTC date
     const ms = Math.round((v - 25569) * 86400 * 1000)
     const d  = new Date(ms)
     if (isNaN(d.getTime())) return null
@@ -32,97 +31,151 @@ function parseDate(v) {
     const da = String(d.getUTCDate()).padStart(2, '0')
     return `${y}-${mo}-${da}`
   }
+  // String
   if (typeof v === 'string') {
     const s = v.trim()
     if (!s) return null
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
-    // "6/15/2026" or "15/6/2026" or "Jun 15, 2026" etc.
     const d = new Date(s)
     if (!isNaN(d.getTime())) {
-      const y  = d.getFullYear()
-      const mo = String(d.getMonth() + 1).padStart(2, '0')
-      const da = String(d.getDate()).padStart(2, '0')
+      const y  = d.getUTCFullYear()
+      const mo = String(d.getUTCMonth() + 1).padStart(2, '0')
+      const da = String(d.getUTCDate()).padStart(2, '0')
       return `${y}-${mo}-${da}`
     }
   }
   return null
 }
 
-// ── Parser ─────────────────────────────────────────────────────────────────────
-// Sheet: "Order & Portions"
-// Col: A=row#(skip) B=order_no C=customer D=style E=order_qty
-//      F=smv G=emb(YES/NO) H=season I=portion_name J=portion_qty
-//      K=mat_arrival L=cut_start M=emb_start N=sew_start O=completion P=exfactory Q=notes
+function str(v) { return String(v ?? '').trim() }
 
-const DATE_COLS = ['K','L','M','N','O','P']
-const DATE_KEYS = ['materialArrivalDate','cutStartDate','embStartDate','sewStartDate','completionDate','exfactoryDate']
+// ── Header detection ───────────────────────────────────────────────────────────
+// Finds the header row by looking for known column names.
+// Returns { headerRowIndex, colMap } where colMap maps field name → array index.
 
-// Words that indicate a row is a header / label, not data
-const HEADER_WORDS = new Set([
-  'order_number','order no','order no.','orderno','order number',
-  'b','col b','column b','#','no','no.',
-])
-
-function isHeaderCell(v) {
-  if (v === null || v === undefined || v === '') return false
-  return HEADER_WORDS.has(String(v).trim().toLowerCase())
+const KNOWN_HEADERS = {
+  order_number:          ['order_number','order no','order no.','order number','orderno','po number','po no'],
+  customer:              ['customer','buyer','client'],
+  style_code:            ['style_code','style code','style','style no','style_no'],
+  order_qty:             ['order_qty','order qty','qty','quantity','order quantity'],
+  smv:                   ['smv'],
+  requires_embroidery:   ['requires_embroidery','embroidery','emb','requires embroidery'],
+  season:                ['season'],
+  portion_name:          ['portion_name','portion name','portion','delivery'],
+  portion_qty:           ['portion_qty','portion qty','portion quantity'],
+  date_material_arrival: ['date_material_arrival','material arrival','material arrival date','mat arrival','mat date'],
+  date_cut_start:        ['date_cut_start','cut start','cut start date','cut date'],
+  date_emb_start:        ['date_emb_start','emb start','embroidery start','emb start date'],
+  date_sew_start:        ['date_sew_start','sew start','sewing start','sew start date','sew date'],
+  date_completion:       ['date_completion','completion','completion date','complete date'],
+  date_exfactory:        ['date_exfactory','exfactory','ex-factory','ex factory','ship date','ex-factory date'],
+  notes:                 ['notes','note','remarks'],
 }
 
+function findHeaderRow(rows) {
+  for (let i = 0; i < Math.min(rows.length, 15); i++) {
+    const row    = rows[i]
+    const normalized = row.map(v => String(v ?? '').trim().toLowerCase())
+
+    // Score this row: how many known headers does it contain?
+    let hits = 0
+    for (const [field, aliases] of Object.entries(KNOWN_HEADERS)) {
+      if (aliases.some(a => normalized.includes(a))) hits++
+    }
+    if (hits >= 3) {
+      // Found the header row — build the column map
+      const colMap = {}
+      for (const [field, aliases] of Object.entries(KNOWN_HEADERS)) {
+        for (const alias of aliases) {
+          const idx = normalized.indexOf(alias)
+          if (idx !== -1) { colMap[field] = idx; break }
+        }
+      }
+      return { headerRowIndex: i, colMap }
+    }
+  }
+  return null
+}
+
+// ── Parser ─────────────────────────────────────────────────────────────────────
+
 function parseSheet(rows) {
-  // Auto-detect where data starts:
-  // Find the first row where col B is non-empty AND not a header keyword.
-  // This handles templates that have any number of title rows above.
-  let dataStart = 0
-  for (let i = 0; i < rows.length; i++) {
-    const b = rows[i][1]  // column B (index 1)
-    if (b !== null && b !== undefined && b !== '' && !isHeaderCell(b)) {
-      dataStart = i
-      break
+  const headerInfo = findHeaderRow(rows)
+  if (!headerInfo) {
+    return {
+      groups: [], errors: [], allPortions: [],
+      debugMsg: 'Could not find header row. Expected a row containing "order_number", "customer", "order_qty" etc. in the first 15 rows.'
     }
   }
 
-  const data        = rows.slice(dataStart)
-  const groups      = {}      // orderNo → order record
+  const { headerRowIndex, colMap } = headerInfo
+  const data = rows.slice(headerRowIndex + 1)
+
+  const groups      = {}
   const errors      = []
-  const allPortions = []      // flat list for preview tab
+  const allPortions = []
+
+  // Helper to get cell value by field name
+  const get = (row, field) => {
+    const idx = colMap[field]
+    return idx !== undefined ? row[idx] : null
+  }
 
   data.forEach((row, i) => {
-    const [A, B, C, D, E, F, G, H, Ic, J, K, L, M, N, O, P, Q] = row
+    const b = get(row, 'order_number')
+    const c = get(row, 'customer')
+    const d = get(row, 'style_code')
+    const e = get(row, 'order_qty')
 
-    // Skip rows where B C D E are ALL empty/null
+    // Skip blank rows
     const empty = v => v === null || v === undefined || v === ''
-    if (empty(B) && empty(C) && empty(D) && empty(E)) return
+    if (empty(b) && empty(c) && empty(d) && empty(e)) return
 
-    const rowNum  = dataStart + i + 1   // 1-based row number for error messages
-    const orderNo  = str(B)
-    const customer = str(C)
-    const style    = str(D)
-    const qty      = parseInt(str(E), 10) || 0
-    const smv      = !empty(F) ? Number(F) : null
-    const requiresEmbroidery = str(G).toUpperCase() === 'YES'
-    const season   = str(H)
-    const portionName = str(Ic) || 'Full order'
-    const portionQtyRaw = !empty(J) ? parseInt(str(J), 10) : null
+    const rowNum  = headerRowIndex + i + 2   // Excel 1-based row number
+    const orderNo  = str(b)
+    const customer = str(c)
+    const style    = str(d)
+    const qty      = Number(str(e).replace(/,/g, '')) || 0
+
+    const portionNameRaw = get(row, 'portion_name')
+    const portionQtyRaw  = get(row, 'portion_qty')
+    const portionName    = str(portionNameRaw) || 'Full order'
+    const portionQty     = portionQtyRaw !== null && portionQtyRaw !== undefined && portionQtyRaw !== ''
+      ? Number(str(String(portionQtyRaw)).replace(/,/g, '')) : null
+
+    const smvRaw = get(row, 'smv')
+    const smv    = smvRaw !== null && smvRaw !== undefined && smvRaw !== '' ? Number(smvRaw) : null
+    const requiresEmbroidery = str(get(row, 'requires_embroidery')).toUpperCase() === 'YES'
+    const season = str(get(row, 'season'))
+    const notes  = str(get(row, 'notes'))
 
     const errs = []
-    if (!orderNo)  errs.push('Order No (col B) is required')
-    if (!customer) errs.push('Customer (col C) is required')
-    if (!style)    errs.push('Style (col D) is required')
-    if (empty(E) || qty <= 0) errs.push('Order Qty (col E) must be > 0')
-    if (portionQtyRaw !== null && portionQtyRaw <= 0) errs.push('Portion Qty (col J) must be > 0')
+    if (!orderNo)  errs.push('Order No is required')
+    if (!customer) errs.push('Customer is required')
+    if (!style)    errs.push('Style is required')
+    if (empty(e) || qty <= 0) errs.push('Order Qty must be > 0')
+    if (portionQty !== null && portionQty <= 0) errs.push('Portion Qty must be > 0')
 
-    // Parse date columns K–P
+    // Parse the 6 date fields
+    const DATE_FIELD_KEYS = [
+      ['date_material_arrival', 'materialArrivalDate'],
+      ['date_cut_start',        'cutStartDate'],
+      ['date_emb_start',        'embStartDate'],
+      ['date_sew_start',        'sewStartDate'],
+      ['date_completion',       'completionDate'],
+      ['date_exfactory',        'exfactoryDate'],
+    ]
     const parsedDates = {}
-    DATE_KEYS.forEach((key, di) => {
-      const raw = [K, L, M, N, O, P][di]
+    for (const [field, key] of DATE_FIELD_KEYS) {
+      const raw = get(row, field)
       if (!empty(raw)) {
         const s = parseDate(raw)
-        if (!s) errs.push(`Invalid date in col ${DATE_COLS[di]}`)
+        if (!s) errs.push(`Invalid date in "${field}"`)
         parsedDates[key] = s
       } else {
         parsedDates[key] = null
       }
-    })
+    }
 
     if (errs.length) {
       errors.push({ rowNum, orderNo: orderNo || '—', error: errs.join('; ') })
@@ -132,30 +185,33 @@ function parseSheet(rows) {
     if (!groups[orderNo]) {
       groups[orderNo] = {
         orderNo, buyer: customer, style, qty,
-        smv, requiresEmbroidery, season,
-        notes: str(Q),
-        portions: [],
-        rowNum,
+        smv, requiresEmbroidery, season, notes,
+        portions: [], rowNum,
       }
     }
 
     const portion = {
       portionName,
-      portionQty: portionQtyRaw ?? qty,
+      portionQty: portionQty ?? qty,
       status: 'pending',
       ...parsedDates,
     }
     groups[orderNo].portions.push(portion)
     allPortions.push({
       orderNo, portionName,
-      portionQty:    portion.portionQty,
-      sewStartDate:  parsedDates.sewStartDate,
+      portionQty:     portion.portionQty,
+      sewStartDate:   parsedDates.sewStartDate,
       completionDate: parsedDates.completionDate,
-      exfactoryDate: parsedDates.exfactoryDate,
+      exfactoryDate:  parsedDates.exfactoryDate,
     })
   })
 
-  return { groups: Object.values(groups), errors, allPortions }
+  const debugMsg =
+    `Header row: ${headerRowIndex + 1}\n` +
+    `Columns found: ${Object.entries(colMap).map(([k,v]) => `${k}→col${v+1}`).join(', ')}\n` +
+    `Data rows: ${data.length} · Orders: ${Object.keys(groups).length} · Errors: ${errors.length}`
+
+  return { groups: Object.values(groups), errors, allPortions, debugMsg }
 }
 
 // ── Paged Table ────────────────────────────────────────────────────────────────
@@ -171,9 +227,7 @@ function PagedTable({ rows, columns, extra }) {
         <table className="w-full text-xs">
           <thead className="bg-slate-50">
             <tr>
-              {columns.map(c => (
-                <th key={c.key} className="text-left px-3 py-2 font-semibold text-slate-500 whitespace-nowrap">{c.label}</th>
-              ))}
+              {columns.map(c => <th key={c.key} className="text-left px-3 py-2 font-semibold text-slate-500 whitespace-nowrap">{c.label}</th>)}
               {extra && <th className="px-3 py-2" />}
             </tr>
           </thead>
@@ -189,11 +243,7 @@ function PagedTable({ rows, columns, extra }) {
               </tr>
             ))}
             {!slice.length && (
-              <tr>
-                <td colSpan={columns.length + (extra ? 1 : 0)} className="px-3 py-6 text-center text-slate-400">
-                  No rows
-                </td>
-              </tr>
+              <tr><td colSpan={columns.length + (extra ? 1 : 0)} className="px-3 py-6 text-center text-slate-400">No rows</td></tr>
             )}
           </tbody>
         </table>
@@ -202,10 +252,8 @@ function PagedTable({ rows, columns, extra }) {
         <div className="flex items-center justify-between text-xs text-slate-500">
           <span>{page * PAGE + 1}–{Math.min((page + 1) * PAGE, total)} of {total}</span>
           <div className="flex gap-1">
-            <button onClick={() => setPage(p => p - 1)} disabled={page === 0}
-              className="px-2 py-1 rounded border disabled:opacity-40 hover:bg-slate-100">‹</button>
-            <button onClick={() => setPage(p => p + 1)} disabled={(page + 1) * PAGE >= total}
-              className="px-2 py-1 rounded border disabled:opacity-40 hover:bg-slate-100">›</button>
+            <button onClick={() => setPage(p => p - 1)} disabled={page === 0} className="px-2 py-1 rounded border disabled:opacity-40 hover:bg-slate-100">‹</button>
+            <button onClick={() => setPage(p => p + 1)} disabled={(page + 1) * PAGE >= total} className="px-2 py-1 rounded border disabled:opacity-40 hover:bg-slate-100">›</button>
           </div>
         </div>
       )}
@@ -222,24 +270,22 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
   const [result, setResult]         = useState(null)
   const [errMsg, setErrMsg]         = useState('')
   const [dragging, setDragging]     = useState(false)
-  const [debugInfo, setDebugInfo]   = useState('')
+  const [debugMsg, setDebugMsg]     = useState('')
 
   const reset = () => {
     setStep('upload'); setParsed(null); setDupActions({})
-    setResult(null); setErrMsg(''); setDebugInfo('')
+    setResult(null); setErrMsg(''); setDebugMsg('')
   }
   const handleClose = () => { reset(); onClose() }
 
   const processFile = useCallback(async (file) => {
     if (!file?.name.endsWith('.xlsx')) { setErrMsg('Please upload an .xlsx file.'); return }
-    setStep('parsing'); setErrMsg(''); setDebugInfo('')
+    setStep('parsing'); setErrMsg(''); setDebugMsg('')
     try {
       const buf = await file.arrayBuffer()
       const wb  = XLSX.read(buf, { type: 'array', cellDates: true })
 
       const sheetNames = Object.keys(wb.Sheets)
-
-      // Find sheet — case-insensitive, ignoring extra spaces
       const targetName = sheetNames.find(
         n => n.trim().toLowerCase().replace(/\s+/g, ' ') === 'order & portions'
       )
@@ -250,24 +296,16 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
       }
 
       const ws   = wb.Sheets[targetName]
-      // raw: true + cellDates: true → date cells come as JS Date objects, numbers as numbers, strings as strings
       const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: true })
 
       if (!rows.length) throw new Error('The sheet is empty.')
 
-      // Debug info — show first 8 rows so we can diagnose layout issues
-      const preview = rows.slice(0, 8).map((r, i) =>
-        `Row ${i+1}: B="${r[1]}" C="${r[2]}" D="${r[3]}" E="${r[4]}"`
-      ).join('\n')
-      setDebugInfo(`Sheet found: "${targetName}"\nRows read: ${rows.length}\n\nFirst 8 rows:\n${preview}`)
-
-      const { groups, errors, allPortions } = parseSheet(rows)
+      const { groups, errors, allPortions, debugMsg: dm } = parseSheet(rows)
+      setDebugMsg(dm || '')
 
       if (!groups.length && !errors.length) {
         throw new Error(
-          `No data rows found. Check that:\n` +
-          `• Column B has order numbers starting from row 7\n` +
-          `• The sheet name is exactly "Order & Portions"`
+          `No data rows found.\n${dm || ''}\n\nCheck that column headers like "order_number", "customer", "order_qty" exist in your sheet.`
         )
       }
 
@@ -313,36 +351,33 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
     setStep('importing')
     let imported = 0, skipped = 0, failed = 0, portionsImported = 0
     const failedRows = []
-
     try {
       const importOne = async (order) => {
         const portions     = order.portions.map(hydratePortion)
-        const firstPortion = portions[0] ?? {}
+        const fp           = portions[0] ?? {}
         await createOrder({
           orderNo: order.orderNo, buyer: order.buyer, style: order.style,
           qty: order.qty, smv: order.smv,
           requiresEmbroidery: order.requiresEmbroidery,
           season: order.season, notes: order.notes,
           status: 'pending', progress: 0, color: '#3b82f6',
-          materialArrivalDate: firstPortion.materialArrivalDate ?? null,
-          cutStartDate:        firstPortion.cutStartDate        ?? null,
-          embStartDate:        firstPortion.embStartDate        ?? null,
-          sewStartDate:        firstPortion.sewStartDate        ?? null,
-          completionDate:      firstPortion.completionDate      ?? null,
-          shipDate:            firstPortion.exfactoryDate       ?? null,
+          materialArrivalDate: fp.materialArrivalDate ?? null,
+          cutStartDate:        fp.cutStartDate        ?? null,
+          embStartDate:        fp.embStartDate        ?? null,
+          sewStartDate:        fp.sewStartDate        ?? null,
+          completionDate:      fp.completionDate      ?? null,
+          shipDate:            fp.exfactoryDate       ?? null,
           portions,
         })
         portionsImported += portions.length
         imported++
       }
-
       const overwriteOne = async (order) => {
         const portions = order.portions.map(hydratePortion)
         await updateOrder(order.existingId, {
           buyer: order.buyer, style: order.style, qty: order.qty, smv: order.smv,
           requiresEmbroidery: order.requiresEmbroidery,
-          season: order.season, notes: order.notes,
-          portions,
+          season: order.season, notes: order.notes, portions,
         })
         portionsImported += portions.length
         imported++
@@ -368,7 +403,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
     }
   }
 
-  const totalValid  = parsed?.valid.length      ?? 0
+  const totalValid  = parsed?.valid.length       ?? 0
   const totalDupes  = parsed?.duplicates.length  ?? 0
   const totalErrors = parsed?.errors.length      ?? 0
   const allOrders   = parsed ? [...parsed.valid, ...parsed.duplicates] : []
@@ -414,19 +449,11 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
                 </div>
               )}
 
-              {debugInfo && (
-                <details className="bg-slate-50 rounded-lg p-3">
-                  <summary className="text-xs font-medium text-slate-500 cursor-pointer">Debug info</summary>
-                  <pre className="text-xs text-slate-400 mt-2 whitespace-pre-wrap">{debugInfo}</pre>
-                </details>
-              )}
-
               <div className="bg-slate-50 rounded-lg p-4 text-xs text-slate-500 space-y-1">
                 <p className="font-semibold text-slate-700 mb-2">Template: SnowCoast_Order_Import_Simple.xlsx</p>
                 <p>• Sheet name must be: <strong>"Order &amp; Portions"</strong></p>
-                <p>• Rows 1–6: title / labels (skipped automatically)</p>
-                <p>• Row 7+: data — one row per portion</p>
-                <p>• Col B–E required · Col I–J: portion name &amp; qty · Col K–P: dates</p>
+                <p>• Must have a header row containing: <code>order_number</code>, <code>customer</code>, <code>order_qty</code>, etc.</p>
+                <p>• Data rows follow immediately after the header row</p>
                 <p>• Same Order No on multiple rows = multiple portions</p>
               </div>
             </div>
@@ -461,6 +488,14 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
                   {allPortions.length} portions
                 </span>
               </div>
+
+              {/* Debug info — always visible in preview so user can verify column mapping */}
+              {debugMsg && (
+                <details className="bg-blue-50 border border-blue-100 rounded-lg p-3">
+                  <summary className="text-xs font-medium text-blue-600 cursor-pointer">Column mapping detected</summary>
+                  <pre className="text-xs text-slate-500 mt-2 whitespace-pre-wrap">{debugMsg}</pre>
+                </details>
+              )}
 
               <Tabs defaultValue="orders">
                 <TabsList>
@@ -497,9 +532,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
                           onClick={() => setDupActions(p => ({ ...p, [row.orderNo]: a }))}
                           className={`text-xs px-2.5 py-1 rounded-full font-medium border transition-colors ${
                             (dupActions[row.orderNo] || 'skip') === a
-                              ? a === 'skip'
-                                ? 'bg-slate-700 text-white border-slate-700'
-                                : 'bg-amber-500 text-white border-amber-500'
+                              ? a === 'skip' ? 'bg-slate-700 text-white border-slate-700' : 'bg-amber-500 text-white border-amber-500'
                               : 'border-slate-300 text-slate-600 hover:border-slate-400'
                           }`}>
                           {a === 'skip' ? 'Skip' : 'Overwrite'}
@@ -576,9 +609,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
             : <>
                 <Button variant="outline" onClick={handleClose} disabled={step === 'importing'}>Cancel</Button>
                 {step === 'preview' && (
-                  <Button onClick={handleConfirm} disabled={!canImport}>
-                    Confirm Import
-                  </Button>
+                  <Button onClick={handleConfirm} disabled={!canImport}>Confirm Import</Button>
                 )}
               </>
           }
