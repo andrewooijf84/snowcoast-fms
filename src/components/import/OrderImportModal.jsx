@@ -3,11 +3,10 @@ import * as XLSX from 'xlsx'
 import { Upload, FileSpreadsheet, AlertCircle, CheckCircle, AlertTriangle, Download } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Spinner } from '@/components/ui/spinner'
-import { excelDateToString, parseLPNumber, readSheetRows, downloadExcelReport } from '@/lib/excelImport'
-import { fetchExistingOrderNos, createOrder, createLineAllocation, updateOrder } from '@/lib/api'
+import { downloadExcelReport } from '@/lib/excelImport'
+import { fetchExistingOrderNos, createOrder, updateOrder } from '@/lib/api'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -15,180 +14,108 @@ function str(v) { return String(v ?? '').trim() }
 
 function parseDate(v) {
   if (v === null || v === undefined || v === '') return null
-  // Already a JS Date object (cellDates: true)
+  // JS Date object (when cellDates:true)
   if (v instanceof Date) {
     if (isNaN(v.getTime())) return null
-    return v.toISOString().slice(0, 10)
+    const y = v.getFullYear()
+    const m = String(v.getMonth() + 1).padStart(2, '0')
+    const d = String(v.getDate()).padStart(2, '0')
+    return `${y}-${m}-${d}`
   }
   // Excel serial number
   if (typeof v === 'number') {
     const d = new Date(Math.round((v - 25569) * 86400 * 1000))
     if (isNaN(d.getTime())) return null
-    return d.toISOString().slice(0, 10)
+    const y = d.getUTCFullYear()
+    const mo = String(d.getUTCMonth() + 1).padStart(2, '0')
+    const da = String(d.getUTCDate()).padStart(2, '0')
+    return `${y}-${mo}-${da}`
   }
-  // String "YYYY-MM-DD" or other
-  const s = excelDateToString(v)
-  return s || null
-}
-
-// ── Old template parser ─────────────────────────────────────────────────────────
-// Sheet: "Order Import" — headers row 4, data from row 5
-
-function parsePortionsSheet(rows) {
-  if (!rows || rows.length < 2) return {}
-  const portionsByOrder = {}
-  rows.slice(1).forEach(row => {
-    const [A, B, C, D, E, F, G, H, I, J] = row
-    if (!A && !B) return
-    const orderNo     = str(A)
-    const portionName = str(B) || 'Full order'
-    const portionQty  = Number(C) || 0
-    if (!orderNo) return
-    const portion = {
-      portionName,
-      portionQty,
-      materialArrivalDate: excelDateToString(D),
-      cutStartDate:        excelDateToString(E),
-      embStartDate:        excelDateToString(F),
-      sewStartDate:        excelDateToString(G),
-      completionDate:      excelDateToString(H),
-      exfactoryDate:       excelDateToString(I),
-      notes:               str(J),
-      status:              'pending',
+  // String "YYYY-MM-DD"
+  if (typeof v === 'string') {
+    const s = v.trim()
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+    // Try parsing other string formats
+    const d = new Date(s)
+    if (!isNaN(d.getTime())) {
+      const y = d.getFullYear()
+      const m = String(d.getMonth() + 1).padStart(2, '0')
+      const da = String(d.getDate()).padStart(2, '0')
+      return `${y}-${m}-${da}`
     }
-    if (!portionsByOrder[orderNo]) portionsByOrder[orderNo] = []
-    portionsByOrder[orderNo].push(portion)
-  })
-  return portionsByOrder
+  }
+  return null
 }
 
-function parseOrderSheet(rows) {
-  // rows[3] = header row (row 4), rows[4+] = data
-  const data = rows.slice(4)
-  const groups = {}
-  const errors = []
+// ── Parser ─────────────────────────────────────────────────────────────────────
+// Sheet: "Order & Portions"
+// Rows 1–6: title / labels / headers  →  skip (slice from index 6)
+// Row 7+: data
+// A=row#(ignore) B=order_no C=customer D=style E=order_qty
+// F=smv G=emb(YES/NO) H=season I=portion_name J=portion_qty
+// K=mat_arrival L=cut_start M=emb_start N=sew_start O=completion P=exfactory Q=notes
 
-  data.forEach((row, i) => {
-    const [A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R] = row
-    if (!A && !B && !C && !D) return
+const DATE_COLS  = ['K','L','M','N','O','P']
+const DATE_KEYS  = ['materialArrivalDate','cutStartDate','embStartDate','sewStartDate','completionDate','exfactoryDate']
 
-    const rowNum  = i + 5
-    const orderNo = str(A)
-    const customer = str(B)
-    const style   = str(C)
-    const qty     = Number(D)
-
-    const errs = []
-    if (!orderNo)  errs.push('Order number required')
-    if (!customer) errs.push('Customer required')
-    if (!style)    errs.push('Style code required')
-    if (!D || qty <= 0) errs.push('Order qty must be > 0')
-
-    const dateFields = { matDate: H, cutDate: I, embDate: J, sewDate: K, compDate: L, shipDate: M }
-    const parsed = {}
-    Object.entries(dateFields).forEach(([k, v]) => {
-      if (v !== null && v !== undefined && v !== '') {
-        const s = excelDateToString(v)
-        if (!s) errs.push(`Invalid date in column ${k.replace('Date','').toUpperCase()}`)
-        parsed[k] = s
-      } else {
-        parsed[k] = null
-      }
-    })
-
-    if (errs.length) { errors.push({ rowNum, orderNo: orderNo || '—', error: errs.join('; ') }); return }
-
-    const lpNum = parseLPNumber(N)
-    const alloc = lpNum ? {
-      linePairNo: lpNum,
-      allocatedQty: Number(O) || 0,
-      startDate: excelDateToString(P),
-      endDate: excelDateToString(Q),
-    } : null
-
-    if (!groups[orderNo]) {
-      groups[orderNo] = {
-        orderNo, buyer: customer, style, qty,
-        smv: Number(E) || null,
-        requiresEmbroidery: str(F).toUpperCase() === 'YES',
-        season: str(G),
-        materialArrivalDate: parsed.matDate,
-        cutStartDate: parsed.cutDate,
-        embStartDate: parsed.embDate,
-        sewStartDate: parsed.sewDate,
-        completionDate: parsed.compDate,
-        shipDate: parsed.shipDate,
-        notes: str(R),
-        allocations: [],
-        rowNum,
-      }
-    }
-    if (alloc) groups[orderNo].allocations.push(alloc)
-  })
-
-  return { groups: Object.values(groups), errors, templateType: 'old' }
-}
-
-// ── New template parser ─────────────────────────────────────────────────────────
-// Sheet: "Order & Portions" — headers row 6, data from row 7
-// Cols: A=row#(ignore), B=order_no, C=customer, D=style, E=order_qty,
-//       F=smv, G=emb(YES/NO), H=season, I=portion_name, J=portion_qty,
-//       K=mat_arrival, L=cut_start, M=emb_start, N=sew_start,
-//       O=completion, P=exfactory, Q=notes
-
-function parseNewOrderSheet(rows) {
-  // rows[5] = header row (row 6), rows[6+] = data
-  const data = rows.slice(6)
-  const groups  = {}   // orderNo → order obj with portions[]
+function parseSheet(rows) {
+  // rows[0..5] = header block (rows 1–6 in Excel), rows[6+] = data
+  const data   = rows.slice(6)
+  const groups  = {}     // orderNo → order record
   const errors  = []
-  const allPortions = []  // flat for preview tab
-
-  const COL_LETTERS = ['K','L','M','N','O','P']
+  const allPortions = [] // flat list for preview
 
   data.forEach((row, i) => {
-    const [A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q] = row
-    // Skip rows where B, C, D, E are ALL empty
+    const [A, B, C, D, E, F, G, H, Ic, J, K, L, M, N, O, P, Q] = row
+    // Skip rows where B C D E are all empty
     if (!B && !C && !D && !E) return
 
-    const rowNum  = i + 7
+    const rowNum  = i + 7  // Excel row number
     const orderNo = str(B)
     const customer = str(C)
     const style   = str(D)
-    const qty     = Number(E) || 0
-    const smv     = F !== null && F !== undefined && F !== '' ? Number(F) : null
+    const qty     = parseInt(E, 10) || 0
+    const smv     = (F !== null && F !== undefined && F !== '') ? Number(F) : null
     const requiresEmbroidery = str(G).toUpperCase() === 'YES'
     const season  = str(H)
-    const portionName = str(I) || 'Full order'
-    const portionQty  = J !== null && J !== undefined && J !== '' ? Number(J) : null
+    const portionName = str(Ic) || 'Full order'
+    const portionQtyRaw = (J !== null && J !== undefined && J !== '') ? parseInt(J, 10) : null
 
     const errs = []
-    if (!orderNo)  errs.push('Order number required')
-    if (!customer) errs.push('Customer required')
-    if (!style)    errs.push('Style code required')
-    if (!E || qty <= 0) errs.push('Order qty must be > 0')
-    if (portionQty !== null && portionQty <= 0) errs.push('Portion qty must be > 0')
+    if (!orderNo)  errs.push('Order No (col B) required')
+    if (!customer) errs.push('Customer (col C) required')
+    if (!style)    errs.push('Style (col D) required')
+    if (!E || qty <= 0) errs.push('Order Qty (col E) must be > 0')
+    if (portionQtyRaw !== null && portionQtyRaw <= 0) errs.push('Portion Qty (col J) must be > 0')
 
-    // Parse date columns K–P
-    const dateVals  = [K, L, M, N, O, P]
-    const dateKeys  = ['materialArrivalDate','cutStartDate','embStartDate','sewStartDate','completionDate','exfactoryDate']
+    // Parse dates K–P
     const parsedDates = {}
-    dateVals.forEach((v, di) => {
-      if (v !== null && v !== undefined && v !== '') {
-        const s = parseDate(v)
-        if (!s) errs.push(`Invalid date in column ${COL_LETTERS[di]}`)
-        parsedDates[dateKeys[di]] = s
+    DATE_KEYS.forEach((key, di) => {
+      const raw = [K, L, M, N, O, P][di]
+      if (raw !== null && raw !== undefined && raw !== '') {
+        const s = parseDate(raw)
+        if (!s) errs.push(`Invalid date in col ${DATE_COLS[di]} (row ${rowNum})`)
+        parsedDates[key] = s
       } else {
-        parsedDates[dateKeys[di]] = null
+        parsedDates[key] = null
       }
     })
 
-    if (errs.length) { errors.push({ rowNum, orderNo: orderNo || '—', error: errs.join('; ') }); return }
+    if (errs.length) {
+      errors.push({ rowNum, orderNo: orderNo || '—', error: errs.join('; ') })
+      return
+    }
 
-    // First row of an order → create the order record
+    // Create order record on first occurrence
     if (!groups[orderNo]) {
       groups[orderNo] = {
-        orderNo, buyer: customer, style, qty,
-        smv, requiresEmbroidery, season,
+        orderNo,
+        buyer: customer,
+        style,
+        qty,
+        smv,
+        requiresEmbroidery,
+        season,
         notes: str(Q),
         portions: [],
         rowNum,
@@ -197,15 +124,15 @@ function parseNewOrderSheet(rows) {
 
     const portion = {
       portionName,
-      portionQty: portionQty ?? qty,
+      portionQty: portionQtyRaw ?? qty,
       status: 'pending',
       ...parsedDates,
     }
     groups[orderNo].portions.push(portion)
-    allPortions.push({ orderNo, portionName, portionQty: portion.portionQty, ...parsedDates })
+    allPortions.push({ orderNo, portionName, portionQty: portion.portionQty, sewStartDate: parsedDates.sewStartDate, exfactoryDate: parsedDates.exfactoryDate, completionDate: parsedDates.completionDate })
   })
 
-  return { groups: Object.values(groups), errors, allPortions, templateType: 'new' }
+  return { groups: Object.values(groups), errors, allPortions }
 }
 
 // ── Paged Table ────────────────────────────────────────────────────────────────
@@ -220,16 +147,31 @@ function PagedTable({ rows, columns, extra }) {
       <div className="overflow-auto rounded border border-slate-200">
         <table className="w-full text-xs">
           <thead className="bg-slate-50">
-            <tr>{columns.map(c => <th key={c.key} className="text-left px-3 py-2 font-semibold text-slate-500 whitespace-nowrap">{c.label}</th>)}</tr>
+            <tr>
+              {columns.map(c => (
+                <th key={c.key} className="text-left px-3 py-2 font-semibold text-slate-500 whitespace-nowrap">{c.label}</th>
+              ))}
+              {extra && <th className="px-3 py-2" />}
+            </tr>
           </thead>
           <tbody>
             {slice.map((row, i) => (
               <tr key={i} className="border-t border-slate-100 hover:bg-slate-50">
-                {columns.map(c => <td key={c.key} className="px-3 py-2 text-slate-700">{c.render ? c.render(row) : row[c.key] ?? '—'}</td>)}
+                {columns.map(c => (
+                  <td key={c.key} className="px-3 py-2 text-slate-700">
+                    {c.render ? c.render(row) : (row[c.key] ?? '—')}
+                  </td>
+                ))}
                 {extra && <td className="px-3 py-2">{extra(row)}</td>}
               </tr>
             ))}
-            {!slice.length && <tr><td colSpan={columns.length + (extra ? 1 : 0)} className="px-3 py-6 text-center text-slate-400">No rows</td></tr>}
+            {!slice.length && (
+              <tr>
+                <td colSpan={columns.length + (extra ? 1 : 0)} className="px-3 py-6 text-center text-slate-400">
+                  No rows
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -237,8 +179,10 @@ function PagedTable({ rows, columns, extra }) {
         <div className="flex items-center justify-between text-xs text-slate-500">
           <span>{page * PAGE + 1}–{Math.min((page + 1) * PAGE, total)} of {total}</span>
           <div className="flex gap-1">
-            <button onClick={() => setPage(p => p - 1)} disabled={page === 0} className="px-2 py-1 rounded border disabled:opacity-40 hover:bg-slate-100">‹</button>
-            <button onClick={() => setPage(p => p + 1)} disabled={(page + 1) * PAGE >= total} className="px-2 py-1 rounded border disabled:opacity-40 hover:bg-slate-100">›</button>
+            <button onClick={() => setPage(p => p - 1)} disabled={page === 0}
+              className="px-2 py-1 rounded border disabled:opacity-40 hover:bg-slate-100">‹</button>
+            <button onClick={() => setPage(p => p + 1)} disabled={(page + 1) * PAGE >= total}
+              className="px-2 py-1 rounded border disabled:opacity-40 hover:bg-slate-100">›</button>
           </div>
         </div>
       )}
@@ -249,17 +193,16 @@ function PagedTable({ rows, columns, extra }) {
 // ── Main Modal ─────────────────────────────────────────────────────────────────
 
 export default function OrderImportModal({ open, onClose, onImportDone }) {
-  const [step, setStep]           = useState('upload')
-  const [parsed, setParsed]       = useState(null)
+  const [step, setStep]             = useState('upload')
+  const [parsed, setParsed]         = useState(null)
   const [dupActions, setDupActions] = useState({})
-  const [result, setResult]       = useState(null)
-  const [errMsg, setErrMsg]       = useState('')
-  const [dragging, setDragging]   = useState(false)
+  const [result, setResult]         = useState(null)
+  const [errMsg, setErrMsg]         = useState('')
+  const [dragging, setDragging]     = useState(false)
 
   const reset = () => {
     setStep('upload'); setParsed(null); setDupActions({}); setResult(null); setErrMsg('')
   }
-
   const handleClose = () => { reset(); onClose() }
 
   const processFile = useCallback(async (file) => {
@@ -267,44 +210,41 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
     setStep('parsing'); setErrMsg('')
     try {
       const buf = await file.arrayBuffer()
+      // cellDates: true → date cells come as JS Date objects
       const wb  = XLSX.read(buf, { type: 'array', cellDates: true })
 
-      // Detect template by sheet name
-      const newRows = readSheetRows(wb, 'Order & Portions')
-      const oldRows = readSheetRows(wb, 'Order Import')
-
-      let parseResult
-      if (newRows) {
-        parseResult = parseNewOrderSheet(newRows)
-      } else if (oldRows) {
-        const portionRows  = readSheetRows(wb, 'Order Portions')
-        const portionsData = parsePortionsSheet(portionRows)
-        const { groups, errors } = parseOrderSheet(oldRows)
-        parseResult = { groups, errors, portionsData, allPortions: [], templateType: 'old' }
-      } else {
-        throw new Error('Sheet not found. Expected "Order & Portions" (new template) or "Order Import" (old template).')
+      // Find the sheet — try exact name, then case-insensitive fallback
+      const targetName = Object.keys(wb.Sheets).find(
+        n => n.trim().toLowerCase() === 'order & portions'
+      )
+      if (!targetName) {
+        const found = Object.keys(wb.Sheets).join(', ')
+        throw new Error(`Sheet "Order & Portions" not found. Sheets in this file: ${found || '(none)'}`)
       }
 
-      const { groups, errors } = parseResult
-      if (!groups.length && !errors.length) throw new Error('No data rows found — the sheet may be empty.')
+      const ws   = wb.Sheets[targetName]
+      // defval: '' so empty cells are '' not undefined
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false })
+      // raw: false → XLSX formats values (dates become strings like "2026-06-15")
+      // This is the most reliable for mixed-type sheets
 
-      const allNos  = groups.map(o => o.orderNo)
-      const existing = await fetchExistingOrderNos(allNos)
+      if (rows.length < 7) throw new Error('File has fewer than 7 rows — check the template format.')
+
+      const { groups, errors, allPortions } = parseSheet(rows)
+      if (!groups.length && !errors.length) throw new Error('No data rows found — the sheet may be empty after row 6.')
+
+      const allNos     = groups.map(o => o.orderNo)
+      const existing   = await fetchExistingOrderNos(allNos)
       const existingMap = Object.fromEntries(existing.map(r => [r.order_no, r.id]))
 
       const valid      = groups.filter(o => !existingMap[o.orderNo])
       const duplicates = groups.filter(o =>  existingMap[o.orderNo]).map(o => ({ ...o, existingId: existingMap[o.orderNo] }))
 
-      const initDupActions = {}
-      duplicates.forEach(o => { initDupActions[o.orderNo] = 'skip' })
+      const initDup = {}
+      duplicates.forEach(o => { initDup[o.orderNo] = 'skip' })
 
-      setParsed({
-        valid, duplicates, errors,
-        portionsData: parseResult.portionsData || {},
-        allPortions:  parseResult.allPortions  || [],
-        templateType: parseResult.templateType,
-      })
-      setDupActions(initDupActions)
+      setParsed({ valid, duplicates, errors, allPortions })
+      setDupActions(initDup)
       setStep('preview')
     } catch (e) {
       setErrMsg(e.message)
@@ -318,7 +258,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
     if (file) processFile(file)
   }, [processFile])
 
-  // ── Convert parsed portion dates to Date objects ───────────────────────────
+  // Convert string dates in a portion to Date objects for the API
   function hydratePortion(p) {
     return {
       ...p,
@@ -337,83 +277,59 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
     const failedRows = []
 
     try {
-      const isNew      = parsed.templateType === 'new'
-      const portionsData = parsed.portionsData || {}
+      const importOne = async (order) => {
+        const portions    = order.portions.map(hydratePortion)
+        const firstPortion = portions[0] ?? {}
 
-      const importOrder = async (order) => {
-        let portions
-        if (isNew) {
-          portions = order.portions.map(hydratePortion)
-        } else {
-          const list = portionsData[order.orderNo]
-          portions = list?.length ? list.map(hydratePortion) : undefined
-        }
-
-        const firstPortion = portions?.[0]
-
-        const saved = await createOrder({
-          orderNo: order.orderNo, buyer: order.buyer, style: order.style,
-          qty: order.qty, smv: order.smv,
+        await createOrder({
+          orderNo: order.orderNo,
+          buyer:   order.buyer,
+          style:   order.style,
+          qty:     order.qty,
+          smv:     order.smv,
           requiresEmbroidery: order.requiresEmbroidery,
-          season: order.season, notes: order.notes,
-          status: 'pending', progress: 0, color: '#3b82f6',
-          // Legacy flat date fields — taken from first portion or order-level fields
-          materialArrivalDate: firstPortion?.materialArrivalDate ?? (order.materialArrivalDate ? new Date(order.materialArrivalDate) : null),
-          cutStartDate:        firstPortion?.cutStartDate        ?? (order.cutStartDate        ? new Date(order.cutStartDate)        : null),
-          embStartDate:        firstPortion?.embStartDate        ?? (order.embStartDate        ? new Date(order.embStartDate)        : null),
-          sewStartDate:        firstPortion?.sewStartDate        ?? (order.sewStartDate        ? new Date(order.sewStartDate)        : null),
-          completionDate:      firstPortion?.completionDate      ?? (order.completionDate      ? new Date(order.completionDate)      : null),
-          shipDate:            firstPortion?.exfactoryDate       ?? (order.shipDate            ? new Date(order.shipDate)            : null),
+          season:  order.season,
+          notes:   order.notes,
+          status:  'pending',
+          progress: 0,
+          color:   '#3b82f6',
+          // Legacy flat date fields (taken from first portion)
+          materialArrivalDate: firstPortion.materialArrivalDate ?? null,
+          cutStartDate:        firstPortion.cutStartDate        ?? null,
+          embStartDate:        firstPortion.embStartDate        ?? null,
+          sewStartDate:        firstPortion.sewStartDate        ?? null,
+          completionDate:      firstPortion.completionDate      ?? null,
+          shipDate:            firstPortion.exfactoryDate       ?? null,
           portions,
         })
-
-        portionsImported += (portions?.length ?? 1)
-
-        // Old template: import line allocations
-        if (!isNew) {
-          for (const a of (order.allocations || [])) {
-            if (a.startDate && a.endDate) {
-              await createLineAllocation({
-                orderId: saved.id, linePairNo: a.linePairNo,
-                allocatedQty: a.allocatedQty, targetDailyPcs: 0,
-                startDate: new Date(a.startDate), endDate: new Date(a.endDate), notes: '',
-              })
-            }
-          }
-        }
+        portionsImported += portions.length
         imported++
       }
 
-      const overwriteOrder = async (order) => {
-        const updates = {
-          buyer: order.buyer, style: order.style, qty: order.qty, smv: order.smv,
-          requiresEmbroidery: order.requiresEmbroidery, season: order.season, notes: order.notes,
-        }
-        if (isNew && order.portions?.length) {
-          updates.portions = order.portions.map(hydratePortion)
-          portionsImported += order.portions.length
-        } else {
-          updates.materialArrivalDate = order.materialArrivalDate ? new Date(order.materialArrivalDate) : null
-          updates.cutStartDate        = order.cutStartDate        ? new Date(order.cutStartDate)        : null
-          updates.embStartDate        = order.embStartDate        ? new Date(order.embStartDate)        : null
-          updates.sewStartDate        = order.sewStartDate        ? new Date(order.sewStartDate)        : null
-          updates.completionDate      = order.completionDate      ? new Date(order.completionDate)      : null
-          updates.shipDate            = order.shipDate            ? new Date(order.shipDate)            : null
-          portionsImported++
-        }
-        await updateOrder(order.existingId, updates)
+      const overwriteOne = async (order) => {
+        const portions = order.portions.map(hydratePortion)
+        await updateOrder(order.existingId, {
+          buyer:   order.buyer,
+          style:   order.style,
+          qty:     order.qty,
+          smv:     order.smv,
+          requiresEmbroidery: order.requiresEmbroidery,
+          season:  order.season,
+          notes:   order.notes,
+          portions,
+        })
+        portionsImported += portions.length
         imported++
       }
 
       for (const order of parsed.valid) {
-        try { await importOrder(order) }
+        try   { await importOne(order) }
         catch (e) { failed++; failedRows.push({ Order: order.orderNo, Error: e.message }) }
       }
 
       for (const order of parsed.duplicates) {
-        const action = dupActions[order.orderNo] || 'skip'
-        if (action === 'overwrite') {
-          try { await overwriteOrder(order) }
+        if ((dupActions[order.orderNo] || 'skip') === 'overwrite') {
+          try   { await overwriteOne(order) }
           catch (e) { failed++; failedRows.push({ Order: order.orderNo, Error: e.message }) }
         } else {
           skipped++
@@ -429,15 +345,13 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
     }
   }
 
-  const totalErrors = parsed?.errors.length ?? 0
-  const totalDupes  = parsed?.duplicates.length ?? 0
-  const totalValid  = parsed?.valid.length ?? 0
-  const isNew       = parsed?.templateType === 'new'
-
-  // Flat portions list for new template preview
-  const allPortions = parsed?.allPortions ?? []
-  // All orders (valid + dupes) for new template Orders tab
+  const totalValid  = parsed?.valid.length      ?? 0
+  const totalDupes  = parsed?.duplicates.length  ?? 0
+  const totalErrors = parsed?.errors.length      ?? 0
   const allOrders   = parsed ? [...parsed.valid, ...parsed.duplicates] : []
+  const allPortions = parsed?.allPortions ?? []
+
+  const canImport = totalValid > 0 || Object.values(dupActions).some(a => a === 'overwrite')
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
@@ -465,34 +379,28 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
                 <Upload className="w-10 h-10 text-slate-400" />
                 <div className="text-center">
                   <p className="text-sm font-medium text-slate-700">Drag your Excel file here, or click to browse</p>
-                  <p className="text-xs text-slate-400 mt-1">.xlsx files only</p>
+                  <p className="text-xs text-slate-400 mt-1">.xlsx only · Template: SnowCoast_Order_Import_Simple.xlsx</p>
                 </div>
                 <input type="file" accept=".xlsx" className="sr-only"
                   onChange={e => { if (e.target.files[0]) processFile(e.target.files[0]) }} />
               </label>
 
               {errMsg && (
-                <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 rounded-lg px-4 py-3">
-                  <AlertCircle className="w-4 h-4 shrink-0" />{errMsg}
+                <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 rounded-lg px-4 py-3">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{errMsg}</span>
                 </div>
               )}
 
-              <div className="bg-slate-50 rounded-lg p-4 text-xs text-slate-500 space-y-2">
-                <p className="font-semibold text-slate-700">Supported templates</p>
-
-                <div className="space-y-0.5">
-                  <p className="font-medium text-slate-600">✦ New template — <span className="font-mono">SnowCoast_Order_Import_Simple.xlsx</span></p>
-                  <p>• Sheet <strong>"Order &amp; Portions"</strong> — headers row 6, data from row 7</p>
-                  <p>• Cols B–E required (Order No, Customer, Style, Qty)</p>
-                  <p>• Cols I–J for portion name &amp; qty; cols K–P for dates</p>
-                  <p>• Multiple rows with the same order number = multiple portions</p>
-                </div>
-
-                <div className="space-y-0.5 pt-1 border-t border-slate-200">
-                  <p className="font-medium text-slate-600">✦ Old template</p>
-                  <p>• Sheet <strong>"Order Import"</strong> — headers row 4, data from row 5</p>
-                  <p>• Optional sheet <strong>"Order Portions"</strong> for multi-portion data</p>
-                </div>
+              <div className="bg-slate-50 rounded-lg p-4 text-xs text-slate-500 space-y-1">
+                <p className="font-semibold text-slate-700 mb-2">Template: SnowCoast_Order_Import_Simple.xlsx</p>
+                <p>• Sheet name: <strong>"Order &amp; Portions"</strong></p>
+                <p>• Rows 1–6: title / labels (skip automatically)</p>
+                <p>• Row 7+: data — one row per portion</p>
+                <p>• Col B–E required (Order No, Customer, Style, Qty)</p>
+                <p>• Col I–J: Portion Name, Portion Qty</p>
+                <p>• Col K–P: 6 date fields</p>
+                <p>• Same Order No on multiple rows = multiple portions</p>
               </div>
             </div>
           )}
@@ -501,7 +409,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
           {step === 'parsing' && (
             <div className="flex flex-col items-center gap-4 py-16">
               <Spinner className="w-10 h-10" />
-              <p className="text-sm text-slate-600">Parsing and validating Excel file…</p>
+              <p className="text-sm text-slate-600">Reading and validating Excel file…</p>
             </div>
           )}
 
@@ -509,12 +417,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
           {step === 'preview' && parsed && (
             <div className="space-y-4">
               {/* Summary chips */}
-              <div className="flex gap-3 flex-wrap items-center">
-                {isNew && (
-                  <span className="text-xs font-medium bg-blue-50 text-blue-700 px-2.5 py-1 rounded-full border border-blue-200">
-                    New template
-                  </span>
-                )}
+              <div className="flex gap-3 flex-wrap">
                 <span className="inline-flex items-center gap-1.5 text-sm text-green-700 bg-green-50 px-3 py-1.5 rounded-full font-medium">
                   <CheckCircle className="w-4 h-4" />{totalValid} new orders
                 </span>
@@ -528,134 +431,94 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
                     <AlertCircle className="w-4 h-4" />{totalErrors} errors
                   </span>
                 )}
-                {isNew && allPortions.length > 0 && (
-                  <span className="inline-flex items-center gap-1.5 text-sm text-slate-600 bg-slate-100 px-3 py-1.5 rounded-full font-medium">
-                    {allPortions.length} portions total
-                  </span>
-                )}
+                <span className="inline-flex items-center gap-1.5 text-sm text-slate-600 bg-slate-100 px-3 py-1.5 rounded-full font-medium">
+                  {allPortions.length} portions total
+                </span>
               </div>
 
-              {/* ── New template tabs ── */}
-              {isNew && (
-                <Tabs defaultValue="orders">
-                  <TabsList>
-                    <TabsTrigger value="orders">Orders ({allOrders.length})</TabsTrigger>
-                    <TabsTrigger value="portions">Portions ({allPortions.length})</TabsTrigger>
-                    <TabsTrigger value="errors">Errors ({totalErrors})</TabsTrigger>
-                  </TabsList>
+              <Tabs defaultValue="orders">
+                <TabsList>
+                  <TabsTrigger value="orders">Orders ({allOrders.length})</TabsTrigger>
+                  <TabsTrigger value="portions">Portions ({allPortions.length})</TabsTrigger>
+                  <TabsTrigger value="errors">Errors ({totalErrors})</TabsTrigger>
+                </TabsList>
 
-                  <TabsContent value="orders" className="mt-3">
-                    <PagedTable rows={allOrders} columns={[
-                      { key: 'orderNo',  label: 'Order No',
-                        render: r => (
-                          <span className="flex items-center gap-1.5">
-                            {r.existingId && <span className="text-xs bg-amber-100 text-amber-700 rounded px-1">dup</span>}
-                            <span className="font-semibold">{r.orderNo}</span>
-                          </span>
-                        )
-                      },
-                      { key: 'buyer',   label: 'Customer' },
-                      { key: 'style',   label: 'Style' },
-                      { key: 'qty',     label: 'Qty', render: r => r.qty.toLocaleString() },
-                      { key: 'portions', label: 'Portions', render: r => (
-                        <span className="text-xs bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-medium">
-                          {r.portions?.length ?? 1} portion{(r.portions?.length ?? 1) !== 1 ? 's' : ''}
+                {/* Orders tab */}
+                <TabsContent value="orders" className="mt-3">
+                  <PagedTable
+                    rows={allOrders}
+                    columns={[
+                      { key: 'orderNo', label: 'Order No', render: r => (
+                        <span className="flex items-center gap-1.5">
+                          {r.existingId && <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">dup</span>}
+                          <span className="font-semibold">{r.orderNo}</span>
                         </span>
                       )},
-                      { key: 'requiresEmbroidery', label: 'Emb', render: r => r.requiresEmbroidery ? <span className="text-pink-600 font-medium">YES</span> : '—' },
-                    ]} extra={row => row.existingId ? (
-                      <div className="flex gap-2">
-                        {['skip', 'overwrite'].map(a => (
-                          <button key={a} onClick={() => setDupActions(p => ({ ...p, [row.orderNo]: a }))}
+                      { key: 'buyer',   label: 'Customer' },
+                      { key: 'style',   label: 'Style' },
+                      { key: 'qty',     label: 'Qty', render: r => r.qty.toLocaleString() },
+                      { key: 'portions',label: 'Portions', render: r => (
+                        <span className="text-xs bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-medium">
+                          {r.portions?.length ?? 1}p
+                        </span>
+                      )},
+                      { key: 'requiresEmbroidery', label: 'Emb', render: r =>
+                        r.requiresEmbroidery
+                          ? <span className="text-pink-600 font-medium text-xs">YES</span>
+                          : <span className="text-slate-300">—</span>
+                      },
+                    ]}
+                    extra={row => row.existingId ? (
+                      <div className="flex gap-1.5">
+                        {['skip','overwrite'].map(a => (
+                          <button key={a}
+                            onClick={() => setDupActions(p => ({ ...p, [row.orderNo]: a }))}
                             className={`text-xs px-2.5 py-1 rounded-full font-medium border transition-colors ${
                               (dupActions[row.orderNo] || 'skip') === a
-                                ? a === 'skip' ? 'bg-slate-700 text-white border-slate-700' : 'bg-amber-500 text-white border-amber-500'
+                                ? a === 'skip'
+                                  ? 'bg-slate-700 text-white border-slate-700'
+                                  : 'bg-amber-500 text-white border-amber-500'
                                 : 'border-slate-300 text-slate-600 hover:border-slate-400'
                             }`}>
                             {a === 'skip' ? 'Skip' : 'Overwrite'}
                           </button>
                         ))}
                       </div>
-                    ) : null} />
-                  </TabsContent>
+                    ) : null}
+                  />
+                </TabsContent>
 
-                  <TabsContent value="portions" className="mt-3">
-                    <PagedTable rows={allPortions} columns={[
-                      { key: 'orderNo',     label: 'Order No' },
-                      { key: 'portionName', label: 'Portion Name' },
-                      { key: 'portionQty',  label: 'Qty', render: r => r.portionQty?.toLocaleString() ?? '—' },
-                      { key: 'sewStartDate', label: 'Sew Start' },
+                {/* Portions tab */}
+                <TabsContent value="portions" className="mt-3">
+                  <PagedTable
+                    rows={allPortions}
+                    columns={[
+                      { key: 'orderNo',       label: 'Order No' },
+                      { key: 'portionName',   label: 'Portion' },
+                      { key: 'portionQty',    label: 'Qty', render: r => r.portionQty?.toLocaleString() ?? '—' },
+                      { key: 'sewStartDate',  label: 'Sew Start' },
+                      { key: 'completionDate',label: 'Completion' },
                       { key: 'exfactoryDate', label: 'Ex-Factory' },
-                      { key: 'completionDate', label: 'Completion' },
-                    ]} />
-                  </TabsContent>
+                    ]}
+                  />
+                </TabsContent>
 
-                  <TabsContent value="errors" className="mt-3">
-                    <PagedTable rows={parsed.errors} columns={[
+                {/* Errors tab */}
+                <TabsContent value="errors" className="mt-3">
+                  <PagedTable
+                    rows={parsed.errors}
+                    columns={[
                       { key: 'rowNum',  label: 'Row' },
                       { key: 'orderNo', label: 'Order No' },
                       { key: 'error',   label: 'Error' },
-                    ]} />
-                  </TabsContent>
-                </Tabs>
-              )}
-
-              {/* ── Old template tabs ── */}
-              {!isNew && (
-                <Tabs defaultValue="valid">
-                  <TabsList>
-                    <TabsTrigger value="valid">Valid ({totalValid})</TabsTrigger>
-                    <TabsTrigger value="dupes">Duplicates ({totalDupes})</TabsTrigger>
-                    <TabsTrigger value="errors">Errors ({totalErrors})</TabsTrigger>
-                  </TabsList>
-
-                  <TabsContent value="valid" className="mt-3">
-                    <PagedTable rows={parsed.valid} columns={[
-                      { key: 'orderNo', label: 'Order No' },
-                      { key: 'buyer',   label: 'Customer' },
-                      { key: 'style',   label: 'Style' },
-                      { key: 'qty',     label: 'Qty', render: r => r.qty.toLocaleString() },
-                      { key: 'smv',     label: 'SMV' },
-                      { key: 'shipDate',label: 'Ship Date' },
-                      { key: 'allocations', label: 'Line Pairs', render: r => r.allocations.length || '—' },
-                    ]} />
-                  </TabsContent>
-
-                  <TabsContent value="dupes" className="mt-3">
-                    <PagedTable rows={parsed.duplicates} columns={[
-                      { key: 'orderNo', label: 'Order No' },
-                      { key: 'buyer',   label: 'Customer' },
-                      { key: 'style',   label: 'Style' },
-                      { key: 'qty',     label: 'Qty', render: r => r.qty.toLocaleString() },
-                    ]} extra={row => (
-                      <div className="flex gap-2">
-                        {['skip', 'overwrite'].map(a => (
-                          <button key={a} onClick={() => setDupActions(p => ({ ...p, [row.orderNo]: a }))}
-                            className={`text-xs px-2.5 py-1 rounded-full font-medium border transition-colors ${
-                              (dupActions[row.orderNo] || 'skip') === a
-                                ? a === 'skip' ? 'bg-slate-700 text-white border-slate-700' : 'bg-amber-500 text-white border-amber-500'
-                                : 'border-slate-300 text-slate-600 hover:border-slate-400'
-                            }`}>
-                            {a === 'skip' ? 'Skip' : 'Overwrite'}
-                          </button>
-                        ))}
-                      </div>
-                    )} />
-                  </TabsContent>
-
-                  <TabsContent value="errors" className="mt-3">
-                    <PagedTable rows={parsed.errors} columns={[
-                      { key: 'rowNum',  label: 'Row' },
-                      { key: 'orderNo', label: 'Order No' },
-                      { key: 'error',   label: 'Error' },
-                    ]} />
-                  </TabsContent>
-                </Tabs>
-              )}
+                    ]}
+                  />
+                </TabsContent>
+              </Tabs>
 
               {errMsg && (
-                <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 rounded-lg px-4 py-3">
-                  <AlertCircle className="w-4 h-4 shrink-0" />{errMsg}
+                <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 rounded-lg px-4 py-3">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><span>{errMsg}</span>
                 </div>
               )}
             </div>
@@ -665,7 +528,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
           {step === 'importing' && (
             <div className="flex flex-col items-center gap-4 py-16">
               <Spinner className="w-10 h-10" />
-              <p className="text-sm text-slate-600">Saving orders to database…</p>
+              <p className="text-sm text-slate-600">Saving to database…</p>
             </div>
           )}
 
@@ -679,15 +542,15 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
                   <p className="text-sm text-slate-500 mt-0.5">
                     {result.imported} order{result.imported !== 1 ? 's' : ''} and{' '}
                     {result.portionsImported} portion{result.portionsImported !== 1 ? 's' : ''} imported
-                    {result.skipped > 0 && ` · ${result.skipped} skipped`}
-                    {(result.errors + result.failed) > 0 && ` · ${result.errors + result.failed} errors`}
+                    {result.skipped > 0 ? ` · ${result.skipped} skipped` : ''}
+                    {(result.errors + result.failed) > 0 ? ` · ${result.errors + result.failed} errors` : ''}
                   </p>
                 </div>
               </div>
               {result.failedRows.length > 0 && (
                 <Button variant="outline" size="sm"
                   onClick={() => downloadExcelReport(result.failedRows, 'order_import_errors.xlsx')}>
-                  <Download className="w-4 h-4" />Download Error Report
+                  <Download className="w-4 h-4 mr-1.5" />Download Error Report
                 </Button>
               )}
             </div>
@@ -700,9 +563,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
             : <>
                 <Button variant="outline" onClick={handleClose} disabled={step === 'importing'}>Cancel</Button>
                 {step === 'preview' && (
-                  <Button
-                    onClick={handleConfirm}
-                    disabled={totalValid === 0 && !Object.values(dupActions).some(a => a === 'overwrite')}>
+                  <Button onClick={handleConfirm} disabled={!canImport}>
                     Confirm Import
                   </Button>
                 )}
