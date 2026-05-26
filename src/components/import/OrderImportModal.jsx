@@ -12,31 +12,18 @@ import { fetchExistingOrderNos, createOrder, updateOrder } from '@/lib/api'
 
 function str(v) { return String(v ?? '').trim() }
 
-function fmt(d) {
-  // Always use LOCAL time — avoids UTC-offset day-shift for UTC+8 timezone
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
-}
-
 function parseDate(v) {
   if (v === null || v === undefined || v === '') return null
-  // JS Date object (cellDates:true)
-  if (v instanceof Date) {
-    return isNaN(v.getTime()) ? null : fmt(v)
-  }
-  // Excel serial number → add to local epoch so getDate() returns correct local day
+  // Excel serial number (dates stored as numbers in Excel)
+  // Formula: days since 1900-01-01, offset 25569 = days from 1900-01-01 to 1970-01-01
   if (typeof v === 'number') {
-    const d = new Date(1900, 0, v - 1)   // local midnight of Excel date
-    return isNaN(d.getTime()) ? null : fmt(d)
+    // toISOString() gives UTC which is correct since serial = whole days
+    return new Date(Math.round((v - 25569) * 86400 * 1000)).toISOString().slice(0, 10)
   }
-  // String
+  // Already a YYYY-MM-DD string
   if (typeof v === 'string') {
     const s = v.trim()
-    if (!s) return null
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
-    // Parse as local time by appending T00:00:00 (no Z)
-    const iso = s.match(/^\d{4}-\d{2}-\d{2}/) ? s + 'T00:00:00' : s
-    const d = new Date(iso)
-    return isNaN(d.getTime()) ? null : fmt(d)
   }
   return null
 }
@@ -262,7 +249,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
     setStep('parsing'); setErrMsg(''); setDebugMsg('')
     try {
       const buf = await file.arrayBuffer()
-      const wb  = XLSX.read(buf, { type: 'array', cellDates: true })
+      const wb  = XLSX.read(buf, { type: 'array' })
 
       const sheetNames = Object.keys(wb.Sheets)
       const targetName = sheetNames.find(
