@@ -16,10 +16,10 @@ function parseDate(v) {
   if (v === null || v === undefined || v === '') return null
   if (v instanceof Date) {
     if (isNaN(v.getTime())) return null
-    // Use UTC to avoid day-shift from timezone offset
-    const y  = v.getUTCFullYear()
-    const mo = String(v.getUTCMonth() + 1).padStart(2, '0')
-    const da = String(v.getUTCDate()).padStart(2, '0')
+    // Use LOCAL time — XLSX creates dates at local midnight, not UTC midnight
+    const y  = v.getFullYear()
+    const mo = String(v.getMonth() + 1).padStart(2, '0')
+    const da = String(v.getDate()).padStart(2, '0')
     return `${y}-${mo}-${da}`
   }
   if (typeof v === 'number') {
