@@ -380,6 +380,7 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
           <DialogTitle className="flex items-center gap-2">
             <FileSpreadsheet className="w-5 h-5 text-blue-600" />
             Import Orders
+            <span className="text-xs font-normal text-slate-400 ml-1">v7</span>
           </DialogTitle>
         </DialogHeader>
 
