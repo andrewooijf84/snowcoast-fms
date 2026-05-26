@@ -110,6 +110,8 @@ function parseSheet(rows) {
 
     const rowNum   = headerRowIndex + i + 2
     const orderNo  = str(b)
+    // Skip rows with no order number silently (totals row, trailing blank, etc.)
+    if (!orderNo) return
     const customer = str(c)
     const style    = str(d)
     const qty      = parseNum(e) ?? 0
@@ -453,12 +455,6 @@ export default function OrderImportModal({ open, onClose, onImportDone }) {
                 </span>
               </div>
 
-              {debugMsg && (
-                <details open className="bg-blue-50 border border-blue-100 rounded-lg p-3">
-                  <summary className="text-xs font-semibold text-blue-700 cursor-pointer">Column mapping — verify this is correct</summary>
-                  <pre className="text-xs text-slate-600 mt-2 whitespace-pre-wrap">{debugMsg}</pre>
-                </details>
-              )}
 
               <Tabs defaultValue={totalErrors > 0 && totalValid === 0 ? 'errors' : 'orders'}>
                 <TabsList>

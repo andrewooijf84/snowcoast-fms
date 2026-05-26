@@ -343,47 +343,50 @@ function OrderTable({ orders, onEdit, onDelete, canEdit, orderProgress }) {
                   </td>
                 </tr>,
                 // Portion sub-rows
-                ...(isOpen ? portions.map((portion, pi) => (
-                  <tr key={`${o.id}-portion-${pi}`} className="border-b border-blue-50 bg-blue-50/40">
-                    <td className="py-1.5 px-3 pl-9">
-                      <span className="text-xs text-blue-700 font-semibold">{portion.portionName}</span>
-                    </td>
-                    <td className="py-1.5 px-3">
-                      <span className="text-xs font-medium text-slate-700">{portion.portionQty.toLocaleString()} pcs</span>
-                      <span className="text-xs text-slate-400 ml-1">
-                        ({o.qty > 0 ? Math.round(portion.portionQty / o.qty * 100) : 0}%)
-                      </span>
-                    </td>
-                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
-                      {portion.materialArrivalDate ? format(new Date(portion.materialArrivalDate), 'MMM dd') : '—'}
-                    </td>
-                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
-                      {portion.cutStartDate ? format(new Date(portion.cutStartDate), 'MMM dd') : '—'}
-                    </td>
-                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
-                      {portion.sewStartDate ? format(new Date(portion.sewStartDate), 'MMM dd') : '—'}
-                    </td>
-                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
-                      {o.requiresEmbroidery ? (portion.embStartDate ? format(new Date(portion.embStartDate), 'MMM dd') : '—') : <span className="text-slate-200">—</span>}
-                    </td>
-                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
-                      {portion.completionDate ? format(new Date(portion.completionDate), 'MMM dd') : '—'}
-                    </td>
-                    <td className="py-1.5 px-3 text-xs text-slate-500 whitespace-nowrap">
-                      {portion.exfactoryDate ? (
-                        <span className="font-medium text-red-600">{format(new Date(portion.exfactoryDate), 'MMM dd')}</span>
-                      ) : '—'}
-                    </td>
-                    <td className="py-1.5 px-3 text-xs text-slate-400" colSpan={3}>
-                      <Badge variant={
-                        portion.status === 'completed' ? 'success'
-                        : portion.status === 'in-production' ? 'info'
-                        : 'secondary'
-                      } className="text-xs">{portion.status}</Badge>
-                      {portion.notes && <span className="ml-2 italic">{portion.notes}</span>}
-                    </td>
-                  </tr>
-                )) : []),
+                ...(isOpen ? portions.map((portion, pi) => {
+                  const dateItems = [
+                    { label: 'Mat Arrival', value: portion.materialArrivalDate, color: 'text-slate-600' },
+                    { label: 'Cut Start',   value: portion.cutStartDate,        color: 'text-blue-600' },
+                    { label: 'Emb Start',   value: portion.embStartDate,        color: 'text-pink-600' },
+                    { label: 'Sew Start',   value: portion.sewStartDate,        color: 'text-green-600' },
+                    { label: 'Completion',  value: portion.completionDate,      color: 'text-amber-600' },
+                    { label: 'Ex-Factory',  value: portion.exfactoryDate,       color: 'text-red-600' },
+                  ].filter(d => d.value)
+                  return (
+                    <tr key={`${o.id}-portion-${pi}`} className="border-b border-blue-50 bg-blue-50/40">
+                      <td className="py-2 px-3 pl-9">
+                        <span className="text-xs text-blue-700 font-semibold">{portion.portionName}</span>
+                      </td>
+                      <td className="py-2 px-3">
+                        <span className="text-xs font-medium text-slate-700">{portion.portionQty.toLocaleString()} pcs</span>
+                        <span className="text-xs text-slate-400 ml-1">
+                          ({o.qty > 0 ? Math.round(portion.portionQty / o.qty * 100) : 0}%)
+                        </span>
+                      </td>
+                      <td className="py-2 px-3" colSpan={6}>
+                        <div className="flex flex-wrap gap-x-3 gap-y-1">
+                          {dateItems.map(({ label, value, color }) => (
+                            <div key={label} className="flex items-center gap-1 text-xs">
+                              <span className="text-slate-400">{label}:</span>
+                              <span className={`font-medium ${color}`}>{format(new Date(value), 'MMM dd')}</span>
+                            </div>
+                          ))}
+                          {dateItems.length === 0 && <span className="text-xs text-slate-300 italic">No dates set</span>}
+                        </div>
+                      </td>
+                      <td className="py-2 px-3 text-xs text-slate-400" colSpan={3}>
+                        <div className="flex items-center gap-2">
+                          <Badge variant={
+                            portion.status === 'completed' ? 'success'
+                            : portion.status === 'in-production' ? 'info'
+                            : 'secondary'
+                          } className="text-xs">{portion.status}</Badge>
+                          {portion.notes && <span className="italic">{portion.notes}</span>}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                }) : []),
               ]
             })}
           </tbody>
