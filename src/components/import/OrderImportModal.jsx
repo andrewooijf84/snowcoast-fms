@@ -12,28 +12,31 @@ import { fetchExistingOrderNos, createOrder, updateOrder } from '@/lib/api'
 
 function str(v) { return String(v ?? '').trim() }
 
+function fmt(d) {
+  // Always use LOCAL time — avoids UTC-offset day-shift for UTC+8 timezone
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+}
+
 function parseDate(v) {
   if (v === null || v === undefined || v === '') return null
+  // JS Date object (cellDates:true)
   if (v instanceof Date) {
-    if (isNaN(v.getTime())) return null
-    // Use LOCAL time — XLSX creates dates at local midnight, not UTC midnight
-    const y  = v.getFullYear()
-    const mo = String(v.getMonth() + 1).padStart(2, '0')
-    const da = String(v.getDate()).padStart(2, '0')
-    return `${y}-${mo}-${da}`
+    return isNaN(v.getTime()) ? null : fmt(v)
   }
+  // Excel serial number → add to local epoch so getDate() returns correct local day
   if (typeof v === 'number') {
-    const d = new Date(Math.round((v - 25569) * 86400 * 1000))
-    if (isNaN(d.getTime())) return null
-    return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`
+    const d = new Date(1900, 0, v - 1)   // local midnight of Excel date
+    return isNaN(d.getTime()) ? null : fmt(d)
   }
+  // String
   if (typeof v === 'string') {
     const s = v.trim()
     if (!s) return null
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
-    const d = new Date(s)
-    if (!isNaN(d.getTime()))
-      return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`
+    // Parse as local time by appending T00:00:00 (no Z)
+    const iso = s.match(/^\d{4}-\d{2}-\d{2}/) ? s + 'T00:00:00' : s
+    const d = new Date(iso)
+    return isNaN(d.getTime()) ? null : fmt(d)
   }
   return null
 }
