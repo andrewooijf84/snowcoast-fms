@@ -1,0 +1,1 @@
+import{i as e}from"./format-Dz1hUOY7.js";function t(t,n){let[r,i]=e(t,n.start,n.end);return{start:r,end:i}}export{t};
